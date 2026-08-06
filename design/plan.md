@@ -14,8 +14,9 @@
 - Single currency `'LKR'`; every money table has `currency char(3)` with `CHECK (currency = 'LKR')`.
 - All ids UUIDv7 generated in the app layer (`uuidv7` package).
 - Dates over the wire: `YYYY-MM-DD`; months: `YYYY-MM`.
-- Error envelope on every non-2xx: `{ error: { code, message, details? } }`; codes: `validation_failed`, `unauthorized`, `not_found`, `conflict`, `rate_limited`, `internal`, `demo_unavailable`.
+- Error envelope on every non-2xx: `{ error: { code, message, details? } }`; codes: `validation_failed`, `unauthorized`, `forbidden`, `not_found`, `conflict`, `rate_limited`, `internal`, `demo_unavailable`. (`forbidden` (403) is used only for the CSRF origin mismatch.)
 - Cross-user access returns `404`, never `403`.
+- Integration-test isolation is **schema-per-suite** (specified in Task 3): every suite migrates into its own Postgres schema; identical model against local testcontainers and the CI service container.
 - Recurring `frequency` column/field is named `frequency` (not `interval` — Postgres keyword).
 - Month-end clamp: always computed from the anchor day-of-month in `start_date`, never from the previously clamped date. Required unit test: Jan 31 → Feb 28 → Mar 31.
 - Sessions: raw token in cookie only; DB stores SHA-256; 30-day sliding expiry, 90-day absolute cap from `created_at`.
@@ -26,7 +27,7 @@
 
 ## File Structure (target)
 
-```
+```text
 .gitattributes  .gitignore  .env.example  docker-compose.yml  Dockerfile
 pnpm-workspace.yaml  package.json  tsconfig.base.json
 .github/workflows/ci.yml  .github/workflows/nightly.yml
@@ -59,9 +60,11 @@ docs/adr/000{1..4}-*.md  docs/architecture.md
 ### Task 1: Monorepo scaffold
 
 **Files:**
+
 - Create: `.gitattributes`, `.gitignore`, `pnpm-workspace.yaml`, `package.json`, `tsconfig.base.json`, `packages/shared/package.json`, `packages/shared/tsconfig.json`, `packages/shared/src/index.ts`, `apps/api/package.json`, `apps/api/tsconfig.json`, `apps/api/src/index.ts`, `apps/web` (via `pnpm create vite`)
 
 **Interfaces:**
+
 - Produces: workspace names `@expense/shared`, `@expense/api`, `@expense/web`; root scripts `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` running recursively.
 
 - [ ] **Step 1: .gitattributes first (before any more files)**
@@ -126,9 +129,11 @@ git add -A && git commit -m "chore: scaffold pnpm monorepo (shared, api, web)"
 ### Task 2: Docker Postgres + Drizzle schema + initial migration
 
 **Files:**
+
 - Create: `docker-compose.yml`, `apps/api/drizzle.config.ts`, `apps/api/src/db/schema.ts`, `apps/api/src/db/client.ts`, `apps/api/src/db/migrate.ts`, `apps/api/drizzle/0000_init.sql` (generated then hand-edited), `apps/api/test/integration/migrations.test.ts`, `apps/api/test/helpers.ts`, `.env.example`
 
 **Interfaces:**
+
 - Produces: `db` (drizzle instance) from `db/client.ts` (`createDb(url): { db, sql }`); all six table objects exported from `db/schema.ts` as `users, sessions, categories, expenses, budgets, recurringRules`; `runMigrations(url)` from `db/migrate.ts`; test helper `startTestDb(): Promise<{ url, stop }>` (testcontainers).
 
 - [ ] **Step 1: docker-compose.yml**
@@ -183,7 +188,9 @@ afterAll(() => stop());
 it("applies all migrations and creates the six tables + citext", async () => {
   await runMigrations(url);
   const sql = postgres(url);
-  const tables = await sql`select table_name from information_schema.tables where table_schema='public'`;
+  // current_schema() (not 'public') so this test keeps working after Task 3
+  // switches helpers.ts to schema-per-suite isolation.
+  const tables = await sql`select table_name from information_schema.tables where table_schema = current_schema()`;
   const names = tables.map(t => t.table_name);
   for (const t of ["users","sessions","categories","expenses","budgets","recurring_rules"])
     expect(names).toContain(t);
@@ -223,7 +230,7 @@ export const users = pgTable("users", {
 - [ ] **Step 4: Generate + hand-edit migration**
 
 Run: `pnpm --filter @expense/api exec drizzle-kit generate`
-Hand-edit `drizzle/0000_init.sql`: prepend `CREATE EXTENSION IF NOT EXISTS citext;` and change `users.email` type to `citext` with a plain `UNIQUE` constraint. Verify every CHECK from schema.md is present; add any drizzle-kit missed as raw SQL.
+Hand-edit `drizzle/0000_init.sql`: prepend `CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA public;` (`WITH SCHEMA public` so the type is found from any schema whose `search_path` ends in `public` — required by Task 3's schema-per-suite isolation; harmless in prod where `search_path` is the default) and change `users.email` type to `citext` with a plain `UNIQUE` constraint. Verify every CHECK from schema.md is present; add any drizzle-kit missed as raw SQL.
 
 `src/db/migrate.ts`:
 
@@ -231,9 +238,15 @@ Hand-edit `drizzle/0000_init.sql`: prepend `CREATE EXTENSION IF NOT EXISTS citex
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
-export async function runMigrations(url: string) {
+export async function runMigrations(url: string, opts: { migrationsSchema?: string } = {}) {
   const sql = postgres(url, { max: 1 });
-  await migrate(drizzle(sql), { migrationsFolder: new URL("../../drizzle", import.meta.url).pathname });
+  await migrate(drizzle(sql), {
+    migrationsFolder: new URL("../../drizzle", import.meta.url).pathname,
+    migrationsTable: "__drizzle_migrations",
+    // Tests override this per suite (Task 3) so each suite's journal lives
+    // inside its own schema; prod/dev use the default.
+    migrationsSchema: opts.migrationsSchema ?? "drizzle",
+  });
   await sql.end();
 }
 ```
@@ -261,13 +274,16 @@ Run: `pnpm --filter @expense/api test` — Expected: PASS.
 git add -A && git commit -m "feat(db): six-table schema, initial migration with citext, migration test"
 ```
 
-### Task 3: CI pipeline
+### Task 3: CI pipeline + test-isolation model
 
 **Files:**
+
 - Create: `.github/workflows/ci.yml`
+- Modify: `apps/api/test/helpers.ts`, `apps/api/test/integration/migrations.test.ts`
 
 **Interfaces:**
-- Produces: workflow `ci` with jobs `checks` (lint→typecheck→test→build) and `e2e` (placeholder until Task 21), plus `deploy` job skeleton gated to push-to-main (hook wired in Task 22).
+
+- Produces: workflow `ci` with jobs `checks` (lint→typecheck→test→build) and `e2e` (placeholder until Task 24), plus `deploy` job skeleton gated to push-to-main (hook wired in Task 25); final `startTestDb(): Promise<{ url, schema, stop }>` implementing **schema-per-suite isolation** — the single isolation model for local and CI, consumed unchanged by every later integration suite (and by `makeTestApp` in Task 5).
 
 - [ ] **Step 1: ci.yml**
 
@@ -289,7 +305,7 @@ jobs:
           --health-timeout 5s --health-retries 10
     env:
       DATABASE_URL: postgres://expense:expense@localhost:5432/expense
-      TESTCONTAINERS_DISABLED: "1"   # tests use DATABASE_URL when set (helpers.ts, Task 5 refinement)
+      TESTCONTAINERS_DISABLED: "1"   # helpers.ts honors this (Step 2 below)
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -305,17 +321,70 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - run: echo "deploy hook wired in Task 22"
+      - run: echo "deploy hook wired in Task 25"
 ```
 
-- [ ] **Step 2: Verify**
+- [ ] **Step 2: helpers.ts — final schema-per-suite isolation (the decided model)**
 
-Push a branch, open a draft PR, confirm `checks` is green and `deploy` is skipped. Note: `helpers.ts` gets a small change in Task 5 so CI uses the service container instead of testcontainers.
+Each integration suite gets its own Postgres **schema**; suites run in
+parallel against one database, and the model is identical locally
+(testcontainers) and in CI (service container via
+`TESTCONTAINERS_DISABLED=1`). Per-test transactional rollback was
+rejected: the app manages its own transactions (signup, generator), which
+would force savepoint nesting and a shared connection between test and
+app.
 
-- [ ] **Step 3: Commit**
+```ts
+import { PostgreSqlContainer } from "@testcontainers/postgresql";
+import postgres from "postgres";
+import { randomBytes } from "node:crypto";
+
+export async function startTestDb() {
+  const schema = `test_${randomBytes(6).toString("hex")}`;
+  let base: string;
+  let stopContainer = async () => {};
+  if (process.env.TESTCONTAINERS_DISABLED === "1") {
+    base = process.env.DATABASE_URL!;            // CI service container
+  } else {
+    const c = await new PostgreSqlContainer("postgres:16").start();
+    base = c.getConnectionUri();
+    stopContainer = async () => { await c.stop(); };
+  }
+  const admin = postgres(base);
+  await admin.unsafe(`create schema "${schema}"`);
+  await admin.end();
+  // search_path = suite schema first, then public — unqualified DDL/DML
+  // lands in the suite schema while the citext type (installed WITH
+  // SCHEMA public, Task 2) still resolves.
+  const url = `${base}?options=${encodeURIComponent(`-c search_path=${schema},public`)}`;
+  return {
+    url,
+    schema,
+    stop: async () => {
+      const s = postgres(base);
+      await s.unsafe(`drop schema "${schema}" cascade`);
+      await s.end();
+      await stopContainer();
+    },
+  };
+}
+```
+
+Callers must run migrations with the journal inside the suite schema:
+`runMigrations(url, { migrationsSchema: schema })`. Without this, the
+second suite against the shared CI database would find the global journal
+already populated, skip the migrations, and see an empty schema. Update
+`migrations.test.ts` accordingly (its `current_schema()` assertion from
+Task 2 already fits).
+
+- [ ] **Step 3: Verify**
+
+Push a branch, open a draft PR, confirm `checks` is green (migration suite passes against the service container) and `deploy` is skipped. Locally with `TESTCONTAINERS_DISABLED=1` against the compose Postgres, run the API test suite twice back-to-back — both runs green proves suites neither collide nor depend on a clean database.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add .github && git commit -m "ci: lint/typecheck/test/build pipeline with Postgres service"
+git add -A && git commit -m "ci: pipeline with Postgres service; schema-per-suite test isolation"
 ```
 
 ## Phase 1 — Shared contract & API foundation (Tasks 4–5)
@@ -323,10 +392,12 @@ git add .github && git commit -m "ci: lint/typecheck/test/build pipeline with Po
 ### Task 4: Shared zod schemas + error envelope
 
 **Files:**
+
 - Create: `packages/shared/src/errors.ts`, `packages/shared/src/schemas/common.ts`, `packages/shared/src/schemas/auth.ts`, `packages/shared/src/schemas/category.ts`, `packages/shared/src/schemas/expense.ts`, `packages/shared/src/schemas/budget.ts`, `packages/shared/src/schemas/recurring.ts`, `packages/shared/src/schemas/reports.ts`, `packages/shared/src/index.ts` (re-exports)
 - Test: `packages/shared/src/schemas/schemas.test.ts`
 
 **Interfaces:**
+
 - Produces (consumed by every later task): `ErrorCode` union + `errorEnvelope(code, message, details?)`; zod schemas — `signupBody`, `loginBody`, `userDto`; `categoryDto`, `createCategoryBody`, `patchCategoryBody`; `expenseDto`, `createExpenseBody`, `patchExpenseBody`, `listExpensesQuery`, `listExpensesResponse`; `budgetPutBody`, `budgetsGetQuery`, `budgetsGetResponse`; `recurringRuleDto`, `createRecurringBody`, `patchRecurringBody`; `reportRangeQuery`, `summaryResponse`, `byCategoryResponse`, `trendResponse`, `budgetStatusResponse`, `topExpensesQuery`. Types inferred and exported (`type Expense = z.infer<typeof expenseDto>` etc).
 
 - [ ] **Step 1: Write failing tests** — representative assertions:
@@ -349,6 +420,11 @@ it("password 8..128", () => {
 it("budget amount may be null (clear)", () => {
   expect(budgetPutBody.parse({ categoryId: crypto.randomUUID(), month: "2026-08", amountMinor: null }).amountMinor).toBeNull();
 });
+it("expense date more than 1 year ahead is rejected; exactly today+1y passes", () => {
+  const base = { amountMinor: 100, categoryId: crypto.randomUUID(), description: "x" };
+  expect(createExpenseBody.safeParse({ ...base, date: plusOneYear() }).success).toBe(true);
+  expect(createExpenseBody.safeParse({ ...base, date: "2099-01-01" }).success).toBe(false);
+});
 ```
 
 Run: `pnpm --filter @expense/shared test` — Expected: FAIL.
@@ -360,13 +436,22 @@ export const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(s => !Numb
 export const isoMonth = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/);
 export const amountMinor = z.number().int().positive();
 export const uuid = z.string().uuid();
+// "future dates allowed, max 1 year ahead" lives HERE so client forms and
+// the API enforce it with the same code. ISO strings compare lexically.
+export const plusOneYear = (d = new Date()) => {
+  const y = new Date(d); y.setFullYear(y.getFullYear() + 1);
+  return y.toISOString().slice(0, 10);
+};
+export const expenseDate = isoDate.refine(s => s <= plusOneYear(), {
+  message: "date cannot be more than 1 year in the future",
+});
 ```
 
 `expense.ts` (pattern for the rest — every field per design/api.md):
 
 ```ts
 export const createExpenseBody = z.object({
-  amountMinor, categoryId: uuid, date: isoDate,
+  amountMinor, categoryId: uuid, date: expenseDate,   // 1-year cap included
   description: z.string().min(1).max(200),
   notes: z.string().max(2000).optional(),
 });
@@ -393,7 +478,7 @@ export const listExpensesResponse = z.object({
 `errors.ts`:
 
 ```ts
-export const ERROR_CODES = ["validation_failed","unauthorized","not_found","conflict","rate_limited","internal","demo_unavailable"] as const;
+export const ERROR_CODES = ["validation_failed","unauthorized","forbidden","not_found","conflict","rate_limited","internal","demo_unavailable"] as const;
 export type ErrorCode = typeof ERROR_CODES[number];
 export const errorEnvelope = (code: ErrorCode, message: string, details?: unknown) =>
   ({ error: { code, message, ...(details !== undefined ? { details } : {}) } });
@@ -410,12 +495,14 @@ git add packages/shared && git commit -m "feat(shared): zod API contract + error
 ### Task 5: Fastify app factory, env, health, error handler, security baseline
 
 **Files:**
+
 - Create: `apps/api/src/env.ts`, `apps/api/src/app.ts`, `apps/api/src/routes/health.ts`, `apps/api/src/plugins/security.ts`, `apps/api/src/lib/ids.ts`
-- Modify: `apps/api/src/index.ts`, `apps/api/test/helpers.ts`
+- Modify: `apps/api/src/index.ts`, `apps/api/test/helpers.ts` (add `makeTestApp` only — isolation model is fixed in Task 3)
 - Test: `apps/api/test/integration/app.test.ts`
 
 **Interfaces:**
-- Produces: `buildApp({ db, env }): FastifyInstance` (zod type provider, pino with request ids honoring `x-request-id`, helmet+CSP self-only, global rate limit 300/min, body limit 32 KB, error handler emitting the envelope); `loadEnv()` (zod-validated `DATABASE_URL`, `SESSION_SECRET` ≥32 chars, `APP_ORIGIN`, optional `SENTRY_DSN`, `PORT` default 3000); `newId()` (uuidv7); test helper `makeTestApp(): Promise<{ app, db, stop }>` — starts DB (testcontainers, or `DATABASE_URL` when `TESTCONTAINERS_DISABLED=1` in CI), runs migrations, builds app.
+
+- Produces: `buildApp({ db, env }): FastifyInstance` (zod type provider, pino with request ids honoring `x-request-id`, helmet+CSP self-only, global rate limit 300/min, body limit 32 KB, error handler emitting the envelope); `loadEnv()` (zod-validated `DATABASE_URL`, `SESSION_SECRET` ≥32 chars, `APP_ORIGIN`, optional `SENTRY_DSN`, `PORT` default 3000); `newId()` (uuidv7); test helper `makeTestApp(): Promise<{ app, db, stop }>` — calls `startTestDb()` (Task 3), runs `runMigrations(url, { migrationsSchema: schema })`, builds app; `stop` closes the app then the schema/container.
 
 - [ ] **Step 1: Failing tests**
 
@@ -459,7 +546,7 @@ export async function buildApp({ db, env }: { db: Db; env: Env }) {
 }
 ```
 
-`index.ts`: `loadEnv()` → `runMigrations` (fail-closed: exit 1 on error) → `createDb` → `buildApp` → `listen({ port, host: "0.0.0.0" })`. `helpers.ts`: honor `TESTCONTAINERS_DISABLED` by using `process.env.DATABASE_URL` (create a fresh schema-per-suite via random schema name to keep suites isolated).
+`index.ts`: `loadEnv()` → `runMigrations` (fail-closed: exit 1 on error) → `createDb` → `buildApp` → `listen({ port, host: "0.0.0.0" })`.
 
 - [ ] **Step 3: Run** — PASS. **Step 4: Commit** `feat(api): app factory, env validation, health, error envelope, security baseline`
 
@@ -468,10 +555,12 @@ export async function buildApp({ db, env }: { db: Db; env: Env }) {
 ### Task 6: Session + user repos, signup/login/logout/me, auth plugin
 
 **Files:**
+
 - Create: `apps/api/src/lib/crypto.ts`, `apps/api/src/repos/users.ts`, `apps/api/src/repos/sessions.ts`, `apps/api/src/repos/categories.ts` (seed-defaults insert only), `apps/api/src/plugins/auth.ts`, `apps/api/src/routes/auth.ts`, `apps/api/src/lib/password-blocklist.ts` (top-10k list, bundled)
 - Test: `apps/api/test/integration/auth.test.ts`, `apps/api/test/unit/crypto.test.ts`
 
 **Interfaces:**
+
 - Produces: `hashPassword/verifyPassword` (argon2id); `createSessionToken(): { token, tokenHash }` (256-bit random, sha256 hex); `sessionsRepo.create(userId): token`, `.findValid(tokenHash): { userId, session } | null` (checks expiry; applies sliding refresh >24h capped at `createdAt + 90d`), `.delete(tokenHash)`, `.deleteAllForUser(userId)`; `authPlugin` decorating `req.userId` (throws 401 envelope when absent) + `app.authenticate` preHandler; routes per design/api.md `### Auth` table; `usersRepo.create` seeds the 8 default categories (Food, Transport, Rent, Utilities, Health, Entertainment, Shopping, Other) in the same transaction.
 - Consumes: `buildApp` (Task 5), schemas (Task 4).
 
@@ -497,16 +586,18 @@ Backdate rows by direct `db.update(sessions)` in the test.
 ### Task 7: CSRF origin check + per-route rate limits
 
 **Files:**
+
 - Modify: `apps/api/src/plugins/security.ts`, `apps/api/src/routes/auth.ts`
 - Test: `apps/api/test/integration/security.test.ts`
 
 **Interfaces:**
-- Produces: `onRequest` hook — mutating methods (POST/PATCH/PUT/DELETE) with an `Origin` header not equal to `env.APP_ORIGIN` → 403 envelope (`unauthorized` code, message "Origin mismatch"); absent Origin allowed (non-browser clients). Route-level rate limits: login 10/min, signup 10/min, demo 5/min (demo route lands in Task 15 — configure the limiter map now).
+
+- Produces: `onRequest` hook — mutating methods (POST/PATCH/PUT/DELETE) with an `Origin` header not equal to `env.APP_ORIGIN` → 403 envelope with code **`forbidden`** (message "Origin mismatch") — `unauthorized` is reserved for 401 per api.md; absent Origin allowed (non-browser clients). Route-level rate limits: login 10/min, signup 10/min, demo 5/min (demo route lands in Task 15 — configure the limiter map now).
 
 - [ ] **Step 1: Failing tests**
 
 ```ts
-it("POST with wrong Origin -> 403; correct Origin -> passes");
+it("POST with wrong Origin -> 403, error.code === 'forbidden'; correct Origin -> passes");
 it("GET with wrong Origin -> unaffected");
 it("11th login attempt in a minute -> 429 rate_limited envelope");
 ```
@@ -518,11 +609,13 @@ it("11th login attempt in a minute -> 429 rate_limited envelope");
 ### Task 8: Categories + Expenses CRUD, with ownership-isolation tests (NOT deferred)
 
 **Files:**
+
 - Create: `apps/api/src/routes/categories.ts`, `apps/api/src/repos/expenses.ts`, `apps/api/src/routes/expenses.ts`
 - Modify: `apps/api/src/repos/categories.ts` (full CRUD), `apps/api/src/app.ts` (register routes)
 - Test: `apps/api/test/integration/categories.test.ts`, `apps/api/test/integration/expenses-crud.test.ts`, `apps/api/test/integration/ownership.test.ts`
 
 **Interfaces:**
+
 - Produces: `categoriesRepo.{listAll, create, rename, setArchived}`; `expensesRepo.{create, patch, delete, findById}` — **every repo method's first parameter is `userId` and every WHERE includes it**; routes per design/api.md. `expensesRepo.create/patch` validate `categoryId` belongs to the user and is active (`400` archived / `404` not owned).
 - Consumes: `authPlugin` (Task 6), schemas (Task 4).
 
@@ -563,11 +656,13 @@ Routes translate `null` → `404` envelope. Register under `/api` prefix with `a
 ### Task 9: Expense list — filters + keyset pagination + first-page totals
 
 **Files:**
+
 - Create: `apps/api/src/lib/cursor.ts`
 - Modify: `apps/api/src/repos/expenses.ts`, `apps/api/src/routes/expenses.ts`
 - Test: `apps/api/test/unit/cursor.test.ts`, `apps/api/test/integration/expenses-list.test.ts`
 
 **Interfaces:**
+
 - Produces: `encodeCursor({ date, id }): string` / `decodeCursor(s): { date, id } | null` (base64url JSON; invalid → null → 400); `expensesRepo.list(userId, { from, to, categoryIds, q, cursor, limit }): { items, nextCursor }` ordered `date DESC, id DESC` using tuple comparison `(date, id) < (cursor.date, cursor.id)`; `expensesRepo.totals(userId, filters): { totalCount, totalAmountMinor }` (SQL `count(*)`, `coalesce(sum(amount_minor),0)`).
 
 - [ ] **Step 1: Failing tests**
@@ -587,11 +682,13 @@ it("q ILIKEs description, max 100 chars enforced");
 ### Task 10: CSV export
 
 **Files:**
+
 - Create: `apps/api/src/lib/csv.ts`
 - Modify: `apps/api/src/routes/expenses.ts`
 - Test: `apps/api/test/unit/csv.test.ts`, `apps/api/test/integration/export.test.ts`
 
 **Interfaces:**
+
 - Produces: `csvRow(fields: string[]): string` (RFC 4180: quote when field contains `",\n`; double embedded quotes); `minorToDecimalString(n): string` (`125000` → `"1250.00"`); `GET /api/expenses/export.csv` — streams, header `date,category,description,notes,amount,currency`, UTF-8 BOM first, `content-disposition: attachment; filename="expenses.csv"`, same filters as list, no pagination.
 
 - [ ] **Step 1: Failing tests** — unit: quoting matrix (`a,b`, `he said "hi"`, newline, unicode); `minorToDecimalString(5)` → `"0.05"`; integration: BOM present (`body[0..2] === EF BB BF`), rows match filters, category name (not id) in column 2.
@@ -602,11 +699,13 @@ it("q ILIKEs description, max 100 chars enforced");
 ### Task 11: Budgets — effective-from model
 
 **Files:**
+
 - Create: `apps/api/src/domain/budgets.ts`, `apps/api/src/repos/budgets.ts`, `apps/api/src/routes/budgets.ts`
 - Modify: `apps/api/test/integration/ownership.test.ts` (unskip budget case)
 - Test: `apps/api/test/unit/budgets-domain.test.ts`, `apps/api/test/integration/budgets.test.ts`
 
 **Interfaces:**
+
 - Produces: pure `resolveEffective(rows: { monthStart, amountMinor }[], month): { amountMinor, effectiveFrom } | null` (greatest `monthStart <= month`; NULL amount ⇒ null result with provenance preserved — returns `{ amountMinor: null, effectiveFrom }` distinct from "no row": both render as unbudgeted, provenance differs); `budgetsRepo.effectiveForMonth(userId, month)` (one SQL query: `DISTINCT ON (category_id) ... WHERE month_start <= $month ORDER BY category_id, month_start DESC`, joined to active categories); `.put(userId, categoryId, month, amountMinor|null)` upsert on the unique triple; routes per api.md (`GET /api/budgets?month=`, `PUT /api/budgets`; PUT → 404 not-owned category, 400 archived).
 
 - [ ] **Step 1: Failing unit tests**
@@ -625,10 +724,12 @@ it("row in future month does not apply to current");
 ### Task 12: Reports — five endpoints, all aggregation in SQL
 
 **Files:**
+
 - Create: `apps/api/src/repos/reports.ts`, `apps/api/src/routes/reports.ts`, `apps/api/src/lib/dates.ts`
 - Test: `apps/api/test/unit/dates.test.ts`, `apps/api/test/integration/reports.test.ts`
 
 **Interfaces:**
+
 - Produces: `lib/dates.ts` — `monthRange(month): { from, to }`, `prevPeriod(from, to): { from, to }` (immediately preceding period of equal length), `monthsBetween(from, to): string[]` (for zero-fill); `reportsRepo` — `summary(userId, from, to)`, `byCategory(userId, from, to)`, `trend(userId, from, to)` (SQL `date_trunc('month', date)` GROUP BY, zero-filled in JS from `monthsBetween` — filling isn't aggregation), `budgetStatus(userId, month)` (joins `budgetsRepo.effectiveForMonth` + spent per category), `topExpenses(userId, from, to, limit)`; routes per api.md `### Reports` table. Every sum is `coalesce(sum(amount_minor), 0)::bigint` in SQL — no JS summation anywhere.
 
 - [ ] **Step 1: Failing tests** — seed a fixed dataset (3 categories, 2 months, known amounts), assert exact numbers: summary totals + `deltaPct` vs previous period (and `prevPeriodTotalMinor: 0` edge → `deltaPct: null`); by-category shares sum to 1 (±ε); trend zero-fills empty middle month; budget-status pct math incl. unbudgeted (`pct: null`) and over-100% cases; top-expenses limit + ordering; `from > to` → 400; span > 5y → 400.
@@ -639,10 +740,12 @@ it("row in future month does not apply to current");
 ### Task 13: Occurrence math (pure domain) + rules CRUD
 
 **Files:**
+
 - Create: `apps/api/src/domain/recurring.ts`, `apps/api/src/repos/recurring.ts`, `apps/api/src/routes/recurring.ts`
 - Test: `apps/api/test/unit/recurring-domain.test.ts`, `apps/api/test/integration/recurring-crud.test.ts`
 
 **Interfaces:**
+
 - Produces (pure, date strings in/out, no Date-object timezone traps — use `YYYY-MM-DD` string math via a tiny `{y,m,d}` parser in the module):
   - `nextOccurrence(rule: { frequency, startDate }, after: string): string` — smallest occurrence date `> after`. Weekly: `startDate + 7k`. Monthly: **anchor day taken from `startDate` every time, clamped to the target month's last day** — never derived from a previously clamped date.
   - `firstOccurrenceOnOrAfter(rule, date): string` — for no-backfill initialization.
@@ -669,10 +772,12 @@ it("firstOccurrenceOnOrAfter with past startDate lands on today-or-later (no bac
 ### Task 14: Generator — idempotent catch-up
 
 **Files:**
+
 - Create: `apps/api/src/jobs/generate-recurring.ts`
 - Test: `apps/api/test/integration/generator.test.ts`
 
 **Interfaces:**
+
 - Produces: `generateRecurring(db, today: string): Promise<{ rulesProcessed, inserted }>` — per rule due (`next_occurrence <= today`), in one transaction per rule: insert expense rows for `occurrencesThrough(rule, next_occurrence, today)` (each `{ ...rule fields, recurringRuleId: rule.id, date: occ }`), advance `next_occurrence` past `today` (or beyond `endDate` ⇒ rule simply never matches again). `ON CONFLICT DO NOTHING` against `expenses_rule_date_uq` as the concurrency backstop.
 - Consumes: `occurrencesThrough`, `nextOccurrence` (Task 13).
 
@@ -694,11 +799,13 @@ it("concurrent double-run: simulate by pre-inserting the occurrence row -> DO NO
 ### Task 15: Ephemeral demo provisioning
 
 **Files:**
+
 - Create: `apps/api/src/seed/demo-data.ts`
 - Modify: `apps/api/src/routes/auth.ts`, `apps/api/src/repos/users.ts`
 - Test: `apps/api/test/integration/demo.test.ts`, `apps/api/test/unit/demo-data.test.ts`
 
 **Interfaces:**
+
 - Produces: `demoDataset(today: string): { categories, expenses, budgets, recurringRules }` — deterministic-shape generator, ~6 months of realistic LKR data relative to `today` (rent 85,000_00 monthly recurring, groceries weekly ~12,000_00 with jitter seeded from a fixed PRNG, utilities/transport/entertainment spread, budgets for 5 categories, 2–3 rules); `POST /api/auth/demo` per api.md: count live demo users → ≥100 ⇒ 503 `demo_unavailable`; else create user (`is_demo`, email `demo-<uuid>@demo.invalid`, random unusable hash), insert dataset, issue session — one transaction, 201.
 - Consumes: sessions (Task 6), rate limit 5/min (configured Task 7).
 
@@ -708,99 +815,170 @@ it("concurrent double-run: simulate by pre-inserting the occurrence row -> DO NO
 ### Task 16: Nightly job — reap → sweep → generate; local seed script
 
 **Files:**
+
 - Create: `apps/api/src/jobs/nightly.ts`, `apps/api/src/jobs/seed-local.ts`, `.github/workflows/nightly.yml`
 - Test: `apps/api/test/integration/nightly.test.ts`
 
 **Interfaces:**
+
 - Produces: `runNightly(db, now): Promise<{ reaped, sweptSessions, rulesProcessed, inserted, failures: string[] }>` — steps **in order**: (1) delete demo users `created_at < now - 24h` (cascades), (2) delete sessions `expires_at < now`, (3) `generateRecurring`. Each step in its own try/catch — a failure records to `failures` and the next step still runs; the CLI wrapper `nightly.ts` logs counts and **`process.exit(1)` if `failures.length > 0`**. Workflow: `schedule: cron "30 20 * * *"` (02:00 Asia/Colombo) + `workflow_dispatch`, runs `pnpm --filter @expense/api exec tsx src/jobs/nightly.ts` with `DATABASE_URL` from secrets.
 - Consumes: `generateRecurring` (Task 14).
 
 - [ ] **Step 1: Failing tests** — old demo user reaped with all data, fresh one kept; expired session gone, valid kept; recurring ran; **step-2 failure injected (mock) → steps 1 and 3 still ran and result.failures is non-empty**.
 - [ ] **Step 2: Implement + `seed-local.ts`** (dev user `dev@local.test` / `devpassword1` + demo dataset; `pnpm seed` root script). **Step 3: Run** — PASS. **Step 4: Commit** `feat(api): nightly reap/sweep/generate job with fail-loud semantics`
 
-## Phase 7 — Frontend foundation (Tasks 17–18)
+## Phase 7 — Frontend foundation (Tasks 17–19)
 
-### Task 17: Design tokens, UI kit, API client, auth context, router shell
+### Task 17: Design tokens + UI kit
 
 **Files:**
-- Create: `apps/web/src/styles/tokens.css`, `apps/web/src/components/ui/{Button,Input,Select,SlideOver,Table,DateRangePicker,EmptyState,Skeleton,MoneyText}.tsx`, `apps/web/src/api/client.ts`, `apps/web/src/auth/AuthContext.tsx`, `apps/web/src/router.tsx`, `apps/web/src/lib/money.ts`, `apps/web/vite.config.ts` (proxy), self-hosted Inter in `apps/web/public/fonts/`
-- Test: `apps/web/src/lib/money.test.ts`, `apps/web/src/api/client.test.ts`
+
+- Create: `apps/web/src/styles/tokens.css`, `apps/web/src/components/ui/{Button,Input,Select,SlideOver,Table,DateRangePicker,EmptyState,Skeleton,MoneyText}.tsx`, `apps/web/src/lib/money.ts`, self-hosted Inter in `apps/web/public/fonts/`
+- Modify: `apps/web/vite.config.ts` (Tailwind v4 plugin)
+- Test: `apps/web/src/lib/money.test.ts`
 
 **Interfaces:**
-- Produces: `formatLKR(amountMinor: number): string` (`125000` → `"Rs 1,250.00"`; the ONLY money formatter — components use `<MoneyText amountMinor={n}/>`); `apiFetch<T>(schema, path, init?): Promise<T>` — prepends `/api`, `credentials: "include"`, parses response with the shared zod schema, throws `ApiError { code, message, status }` from the envelope; on 401 dispatches `auth:expired` event (AuthContext listens → redirect to `/login?next=`); `useAuth(): { user, signup, login, demo, logout }` bootstrapped from `GET /api/auth/me`; router: public `/login`, `/signup`; authed layout (sidebar nav) wrapping `/`, `/expenses`, `/budgets`, `/settings`, route-level `lazy()`.
+
+- Produces: `formatLKR(amountMinor: number): string` (`125000` → `"Rs 1,250.00"`; the ONLY money formatter — components use `<MoneyText amountMinor={n}/>`); the UI primitive kit (no external component library) styled entirely from the token layer.
 - Tokens (Linear direction, from design/delivery.md): dark-first `:root` palette — bg `#0e0f11`, surface `#17181b`, border `#26282d`, text `#e6e7e9`, muted `#8a8f98`, accent `#5e6ad2`; light theme via `[data-theme="light"]`; spacing on the 8px grid; `font-variant-numeric: tabular-nums` utility class applied by `MoneyText` and table cells; Inter via `@font-face` (self-hosted — CSP has no font CDN).
-- Consumes: shared schemas/types (Task 4).
 
-- [ ] **Step 1: Failing unit tests** — `formatLKR(5)` → `"Rs 0.05"`, `formatLKR(125000)` → `"Rs 1,250.00"`, `formatLKR(100000000)` → `"Rs 1,000,000.00"`; `apiFetch` throws `ApiError` with envelope code on 4xx (mock `fetch`), parses success through schema.
-- [ ] **Step 2: Implement** (Tailwind v4 `@theme` from tokens; Vite proxy `/api → http://localhost:3000`). **Step 3: Run + eyeball** `pnpm dev` shows login shell. **Step 4: Commit** `feat(web): tokens, UI kit, typed API client, auth context, router`
+- [ ] **Step 1: Failing unit tests** — `formatLKR(5)` → `"Rs 0.05"`, `formatLKR(125000)` → `"Rs 1,250.00"`, `formatLKR(100000000)` → `"Rs 1,000,000.00"`.
+- [ ] **Step 2: Implement** (Tailwind v4 `@theme` from tokens). **Step 3: Run + eyeball** a scratch kitchen-sink route rendering every primitive in `pnpm dev` (delete the route in Task 18). **Step 4: Commit** `feat(web): design tokens and UI kit`
 
-### Task 18: Auth pages + demo button
+### Task 18: Typed API client, auth context, router shell
 
 **Files:**
+
+- Create: `apps/web/src/api/client.ts`, `apps/web/src/auth/AuthContext.tsx`, `apps/web/src/router.tsx`
+- Modify: `apps/web/vite.config.ts` (dev proxy `/api → http://localhost:3000`)
+- Test: `apps/web/src/api/client.test.ts`
+
+**Interfaces:**
+
+- Produces: `apiFetch<T>(schema, path, init?): Promise<T>` — prepends `/api`, `credentials: "include"`, parses response with the shared zod schema, throws `ApiError { code, message, status }` from the envelope; on 401 dispatches `auth:expired` event (AuthContext listens → redirect to `/login?next=`); `useAuth(): { user, signup, login, demo, logout }` bootstrapped from `GET /api/auth/me`; router: public `/login`, `/signup`; authed layout (sidebar nav) wrapping `/`, `/expenses`, `/budgets`, `/settings`, route-level `lazy()`.
+- Consumes: shared schemas/types (Task 4), UI kit (Task 17).
+
+- [ ] **Step 1: Failing unit tests** — `apiFetch` throws `ApiError` with envelope code on 4xx (mock `fetch`), parses success through the schema, dispatches `auth:expired` on 401.
+- [ ] **Step 2: Implement.** **Step 3: Run + eyeball** `pnpm dev` shows the routed shell redirecting to `/login`. **Step 4: Commit** `feat(web): typed API client, auth context, router shell`
+
+### Task 19: Auth pages + demo button
+
+**Files:**
+
 - Create: `apps/web/src/features/auth/{LoginPage,SignupPage}.tsx`
 
 **Interfaces:**
+
 - Consumes: `useAuth`, shared `signupBody`/`loginBody` via react-hook-form zod resolver.
 - Produces: working login/signup with inline field errors (from zod) and API error banner (envelope message); "Try the demo" button → `POST /api/auth/demo` → navigate `/`; demo capacity 503 renders its message.
 
 - [ ] **Step 1: Implement** (forms per delivery.md; redirect-back via `?next=`). **Step 2: Verify manually** against local API: signup → lands on `/`; wrong password shows single opaque error; demo button works. **Step 3: Commit** `feat(web): auth pages with demo login`
 
-## Phase 8 — Feature pages (Tasks 19–20)
+## Phase 8 — Feature pages (Tasks 20–23)
 
-### Task 19: Expenses page (table, filters, infinite scroll, slide-over CRUD, export)
+### Task 20: Expenses page (table, filters, infinite scroll, slide-over CRUD, export)
 
 **Files:**
-- Create: `apps/web/src/features/expenses/{ExpensesPage,ExpenseTable,FilterBar,ExpenseForm,useExpenses.ts}.tsx`, `apps/web/src/features/categories/useCategories.ts`
+
+- Create: `apps/web/src/features/expenses/{ExpensesPage,ExpenseTable,FilterBar,ExpenseForm}.tsx`, `apps/web/src/features/expenses/{useExpenses.ts,filters.ts}`, `apps/web/src/features/categories/useCategories.ts`, `apps/web/src/test/setup.ts`
+- Modify: `apps/web/vite.config.ts` (vitest `environment: "jsdom"`); add dev deps `@testing-library/react`, `@testing-library/user-event`, `jsdom`
+- Test: `apps/web/src/features/expenses/filters.test.ts`, `apps/web/src/features/expenses/useExpenses.test.tsx`
 
 **Interfaces:**
-- Produces: `useExpenses(filters)` — TanStack `useInfiniteQuery` keyed `["expenses", filters]`, page param = cursor; mutations `useCreateExpense` (optimistic insert into first page, rollback on error), `useUpdateExpense`, `useDeleteExpense` (confirm then invalidate); page per delivery.md: dense table (date, category, description + notes dot, right-aligned tabular amount), filter bar (date range, category multi-select incl. archived, debounced 300ms search), first-page totals row, slide-over `ExpenseForm` (shared-schema resolver) for add/edit, delete confirm, "Export CSV" anchor → `/api/expenses/export.csv?<current filters>`.
+
+- Produces: `filtersToSearchParams(filters): URLSearchParams` — the single serializer from filter state to list query params (dates, comma-joined `categoryIds`, `q`, `limit`; empty/undefined omitted), used by BOTH `useExpenses` and the CSV-export link so they can never disagree; `useExpenses(filters)` — TanStack `useInfiniteQuery` keyed `["expenses", filters]`, page param = cursor; mutations `useCreateExpense` (optimistic insert into first page, rollback on error), `useUpdateExpense`, `useDeleteExpense` (confirm then invalidate); page per delivery.md: dense table (date, category, description + notes dot, right-aligned tabular amount), filter bar (date range, category multi-select incl. archived, debounced 300ms search), first-page totals row, slide-over `ExpenseForm` (shared-schema resolver) for add/edit, delete confirm, "Export CSV" anchor → `/api/expenses/export.csv?${filtersToSearchParams(filters)}`.
 - Consumes: `apiFetch`, `listExpensesQuery`/`listExpensesResponse` types, UI kit.
 
-- [ ] **Step 1: Implement hooks then page.** Empty/loading/error states explicit (EmptyState with "Add your first expense" CTA; Skeleton rows; error retry). **Step 2: Verify manually** with seeded local data: filter compose, infinite scroll no-dup, optimistic add rollback (kill API mid-add), export downloads filtered CSV. **Step 3: Commit** `feat(web): expenses page`
+- [ ] **Step 1: Failing component/unit tests — required; manual verification is NOT sufficient for the optimistic path:**
 
-### Task 20: Dashboard, Budgets, Settings pages + SVG charts
+```ts
+// filters.test.ts — serialization matrix:
+it("serializes from/to/q/limit; comma-joins categoryIds; omits empty and undefined values");
+it("output round-trips through listExpensesQuery.parse — the server accepts exactly what the client sends");
+// useExpenses.test.tsx — jsdom, QueryClientProvider wrapper, apiFetch mocked:
+it("optimistic add: new row present in the rendered first page before the mutation resolves");
+it("rollback: mutation rejects (400 ApiError) -> optimistic row removed, cache identical to pre-mutation snapshot, error surfaced");
+```
+
+- [ ] **Step 2: Implement hooks then page.** Empty/loading/error states explicit (EmptyState with "Add your first expense" CTA; Skeleton rows; error retry). **Step 3: Run tests** — PASS; then **verify manually** with seeded local data: filter compose, infinite scroll no-dup, export downloads filtered CSV. **Step 4: Commit** `feat(web): expenses page`
+
+### Task 21: SVG charts + Dashboard
 
 **Files:**
-- Create: `apps/web/src/components/charts/{LineChart,BarList}.tsx`, `apps/web/src/features/reports/{DashboardPage,useReports.ts}`, `apps/web/src/features/budgets/{BudgetsPage,useBudgets.ts}`, `apps/web/src/features/categories/CategoriesPanel.tsx`, `apps/web/src/features/recurring/{RecurringPanel,RuleForm}.tsx`, `apps/web/src/features/settings/SettingsPage.tsx`
+
+- Create: `apps/web/src/components/charts/{LineChart,BarList}.tsx`, `apps/web/src/features/reports/{DashboardPage,useReports.ts}`
 
 **Interfaces:**
-- Produces: `LineChart({ points: {x,y}[] })` and `BarList({ rows: {label, value, max, annotation?}[] })` — plain SVG/div, no chart lib, tabular-nums; Dashboard: date-range picker (default current month) driving `useReports` queries (summary stat row with delta, budget-status BarList, 6-month trend LineChart, by-category BarList, top-5 list); Budgets: month picker, rows of effective budget ("since <month>" provenance from `effectiveFrom`), spent/remaining/pct bar, inline edit (PUT), clear action (PUT null); Settings: categories panel (add/rename/archive/unarchive, archived collapsed) + recurring panel (list with next occurrence, create/edit/delete via `RuleForm`, "future occurrences only" copy).
-- Consumes: report/budget/recurring schemas, UI kit, `formatLKR`.
 
-- [ ] **Step 1: Implement charts (unit-testable pure path math ok to skip — visual verify).** **Step 2: Implement pages.** **Step 3: Verify manually** against demo dataset: numbers reconcile with the expenses table (spot-check one category's month total), over-budget renders, clear-budget flows. **Step 4: Commit** `feat(web): dashboard, budgets, settings`
+- Produces: `LineChart({ points: {x,y}[] })` and `BarList({ rows: {label, value, max, annotation?}[] })` — plain SVG/div, no chart lib, tabular-nums; Dashboard: date-range picker (default current month) driving `useReports` queries — summary stat row with delta, budget-status BarList, 6-month trend LineChart, by-category BarList, top-5 list.
+- Consumes: report schemas, UI kit, `formatLKR`.
 
-## Phase 9 — E2E, deploy, docs (Tasks 21–23)
+- [ ] **Step 1: Implement charts** (pure path math; visual verify). **Step 2: Implement dashboard.** **Step 3: Verify manually** against the demo dataset: numbers reconcile with the expenses table (spot-check one category's month total). **Step 4: Commit** `feat(web): dashboard with in-repo SVG charts`
 
-### Task 21: Playwright E2E — exactly 3 flows
+### Task 22: Budgets page
 
 **Files:**
+
+- Create: `apps/web/src/features/budgets/{BudgetsPage,useBudgets.ts}`
+
+**Interfaces:**
+
+- Produces: month picker; per-category rows of effective budget ("since &lt;month&gt;" provenance from `effectiveFrom`), spent/remaining/pct bar, inline edit (PUT), clear action (PUT null).
+- Consumes: budget schemas + budget-status report, UI kit, `BarList` (Task 21), `formatLKR`.
+
+- [ ] **Step 1: Implement.** **Step 2: Verify manually**: set/override/clear across months matches the effective-from semantics; over-budget (>100%) renders; provenance shows the correct "since" month. **Step 3: Commit** `feat(web): budgets page`
+
+### Task 23: Settings page — categories + recurring rules
+
+**Files:**
+
+- Create: `apps/web/src/features/categories/CategoriesPanel.tsx`, `apps/web/src/features/recurring/{RecurringPanel,RuleForm}.tsx`, `apps/web/src/features/settings/SettingsPage.tsx`
+
+**Interfaces:**
+
+- Produces: categories panel (add/rename/archive/unarchive, archived shown collapsed, 409 conflicts surfaced inline) + recurring panel (list with next-occurrence date, create/edit/delete via `RuleForm` with shared-schema resolver, "future occurrences only" copy on the form).
+- Consumes: category/recurring schemas, UI kit.
+
+- [ ] **Step 1: Implement.** **Step 2: Verify manually**: duplicate-name 409 shows inline; archived category disappears from the expense form but stays in filters; editing a rule updates its next occurrence. **Step 3: Commit** `feat(web): settings — categories and recurring rules`
+
+## Phase 9 — E2E, deploy, docs (Tasks 24–26)
+
+### Task 24: Playwright E2E — exactly 3 flows
+
+**Files:**
+
 - Create: `playwright.config.ts`, `e2e/{signup.spec.ts, add-expense.spec.ts, dashboard.spec.ts}`
 - Modify: `.github/workflows/ci.yml` (e2e job)
 
 **Interfaces:**
+
 - Consumes: built app (`apps/api` serving built `apps/web` via `@fastify/static` — wire static serving + SPA fallback into `app.ts` here, env `STATIC_DIR`), CI Postgres service.
 - Produces: 3 specs, nothing more (spec constraint): (1) signup with unique email → dashboard heading visible; (2) add expense via slide-over → row appears in table; (3) that expense's amount reflected in dashboard summary + category breakdown. CI `e2e` job: `needs: checks`, build → migrate → start server → `playwright test`.
 
 - [ ] **Step 1: Wire static serving + write specs (webServer in playwright.config launches the built server).** **Step 2: Run locally** — 3 PASS. **Step 3: CI green.** **Step 4: Commit** `test(e2e): three smoke flows; api serves built SPA`
 
-### Task 22: Dockerfile + Render/Neon deploy
+### Task 25: Dockerfile + Render/Neon deploy
 
 **Files:**
+
 - Create: `Dockerfile`, `.dockerignore`
 - Modify: `.github/workflows/ci.yml` (deploy job real)
 
 **Interfaces:**
+
 - Produces: multi-stage Dockerfile (pnpm fetch → build all → prune prod → runtime `node:22-slim` running `node apps/api/dist/index.js` with `STATIC_DIR=apps/web/dist`); boot = migrate fail-closed then listen (already Task 5); deploy job replaces echo with `curl -fsS "$RENDER_DEPLOY_HOOK"` (secret), still `needs: [checks, e2e]` + push-to-main condition.
 - Manual (documented in README, done by user): create Neon DB + Render service (Docker, health check `/health`), set env (`DATABASE_URL`, `SESSION_SECRET`, `APP_ORIGIN=https://<app>.onrender.com`), add GitHub secrets `RENDER_DEPLOY_HOOK`, `DATABASE_URL` (for nightly), configure uptime pinger on `/health`.
 
 - [ ] **Step 1: Dockerfile + local verify** `docker build . && docker run` against compose Postgres → app serves SPA + API. **Step 2: Wire deploy job.** **Step 3: Deploy, verify live demo flow end-to-end.** **Step 4: Commit** `feat(deploy): production image and Render deploy on main`
 
-### Task 23: README, ADRs, architecture doc
+### Task 26: README, ADRs, architecture doc
 
 **Files:**
+
 - Create: `README.md`, `docs/adr/0001-sessions-over-jwt.md`, `docs/adr/0002-integer-minor-units-for-money.md`, `docs/adr/0003-aggregation-in-sql.md`, `docs/adr/0004-ephemeral-demo-users.md`, `docs/architecture.md`
 
 **Interfaces:**
+
 - Consumes: everything shipped; content requirements in design/delivery.md `## Documentation`.
 - Produces: README (hero screenshot, live link + cold-start note, features, `docker compose up` + `pnpm i && pnpm dev` + `pnpm seed` quickstart, architecture sketch, ADR links); each ADR = Context / Decision / Consequences / Alternatives-rejected (≤1 page); architecture.md: monorepo map, request lifecycle, auth flow diagram (mermaid), cron design.
 
@@ -810,6 +988,14 @@ it("concurrent double-run: simulate by pre-inserting the occurrence row -> DO NO
 
 ## Self-Review (performed)
 
-- **Spec coverage:** schema.md → Task 2 (all six tables, citext, checks, indexes); api.md → Tasks 4–12, 15 (all routes incl. demo 503, envelope codes, session caps, CSRF, rate limits, first-page totals, q cap); delivery.md → Tasks 17–23 (pages, tokens, tests per layer, CI gating, nightly order + fail-loud, ADRs, uptime pinger). Ordering constraints honored: Phase 0 = Tasks 1–3 before all feature work; ownership isolation written in Task 8 (first CRUD task) with one explicitly-marked skip unskipped in Task 11.
-- **Placeholder scan:** no TBDs; Task 3's deploy echo and Task 8's `it.skip` are deliberate, tracked, and closed in Tasks 22 and 11 respectively.
-- **Type consistency:** repo methods are userId-first throughout; `nextOccurrence`/`occurrencesThrough`/`firstOccurrenceOnOrAfter` names match between Tasks 13–16; `formatLKR`, `apiFetch`, `errorEnvelope`, `runMigrations`, `buildApp`, `makeTestApp` used consistently under one name each.
+- **Spec coverage:** schema.md → Task 2 (all six tables, citext, checks, indexes); api.md → Tasks 4–12, 15 (all routes incl. demo 503, envelope codes, session caps, CSRF, rate limits, first-page totals, q cap); delivery.md → Tasks 17–26 (pages, tokens, tests per layer, CI gating, nightly order + fail-loud, ADRs, uptime pinger). Ordering constraints honored: Phase 0 = Tasks 1–3 before all feature work; ownership isolation written in Task 8 (first CRUD task) with one explicitly-marked skip unskipped in Task 11.
+- **Placeholder scan:** no TBDs; Task 3's deploy echo and Task 8's `it.skip` are deliberate, tracked, and closed in Tasks 25 and 11 respectively.
+- **Type consistency:** repo methods are userId-first throughout; `nextOccurrence`/`occurrencesThrough`/`firstOccurrenceOnOrAfter` names match between Tasks 13–16; `formatLKR`, `apiFetch`, `errorEnvelope`, `runMigrations`, `buildApp`, `makeTestApp`, `startTestDb`, `filtersToSearchParams` used consistently under one name each.
+
+## Revision log (2026-08-06, pre-execution review)
+
+1. Old Task 17 split into Tasks 17 (tokens + UI kit) and 18 (API client + auth context + router); old Task 20 split into Tasks 21 (charts + dashboard), 22 (budgets), 23 (settings). 26 tasks total; each is now a reviewable diff.
+2. Test isolation pinned to **schema-per-suite** (per-test transactions rejected — the app manages its own transactions). Fully specified in Task 3 with `search_path=<schema>,public`, `CREATE EXTENSION citext WITH SCHEMA public` (Task 2), and the migrations journal placed inside the suite schema via `runMigrations(url, { migrationsSchema })`. `TESTCONTAINERS_DISABLED` handling moved from Task 5 into Task 3, alongside the ci.yml that sets it. delivery.md updated to match.
+3. Task 20 gained required component tests: optimistic-insert rollback and filter → query-param serialization (`filtersToSearchParams`, also used by the CSV export link).
+4. CSRF origin mismatch now returns 403 with new code `forbidden` (was incorrectly reusing `unauthorized`, which api.md defines as 401). Code added to `ERROR_CODES` and api.md.
+5. The "future dates max 1 year ahead" rule moved into `createExpenseBody` in `packages/shared` (`expenseDate` in common.ts) so client forms enforce it with the same code as the API.

@@ -76,8 +76,19 @@ Companion to `design/schema.md` and `design/api.md`.
 - Cursor encode/decode round-trip.
 - Password common-list check.
 
+**Component (Vitest + Testing Library, jsdom — apps/web):**
+
+- Optimistic-insert rollback on the expenses page: optimistic row visible
+  before the mutation resolves; on server error the cache is restored to
+  its pre-mutation snapshot and the error surfaces.
+- Filter state → query-param serialization (`filtersToSearchParams`):
+  round-trips through the shared `listExpensesQuery` schema; used by both
+  the list hook and the CSV-export link.
+
 **API integration (Vitest + real Postgres — testcontainers locally,
-service container in CI; per-suite transactional isolation):**
+service container in CI; schema-per-suite isolation: each suite migrates
+into its own Postgres schema via `search_path`, so suites run in parallel
+against one database — full mechanics in design/plan.md Task 3):**
 
 - Auth: signup (dup email 409), login (opaque 401), logout, session
   expiry + sliding refresh + 90-day absolute cap, token rotation.

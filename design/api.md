@@ -28,8 +28,10 @@ Every non-2xx response:
 ```
 
 Stable codes: `validation_failed` (400), `unauthorized` (401),
-`not_found` (404), `conflict` (409), `rate_limited` (429),
-`internal` (500), `demo_unavailable` (503). `details` appears only for `validation_failed`
+`forbidden` (403 — used only for the CSRF origin mismatch; cross-user
+access is always `not_found`), `not_found` (404), `conflict` (409),
+`rate_limited` (429), `internal` (500), `demo_unavailable` (503).
+`details` appears only for `validation_failed`
 (zod issue list) and is never a stack trace.
 
 ## Sessions
@@ -57,7 +59,7 @@ Same-origin deployment (SPA served by the API) makes this tractable:
 1. `SameSite=Lax` cookie — browsers won't attach it to cross-site POSTs.
 2. Origin check — all mutating methods (POST/PATCH/PUT/DELETE) verify the
    `Origin` header matches the configured app origin; mismatch or absence
-   (non-browser clients aside) → `403`.
+   (non-browser clients aside) → `403` with error code `forbidden`.
 
 No CSRF token dance needed; both layers documented in the security ADR.
 
@@ -136,7 +138,8 @@ Request body size capped at 32 KB.
 - POST/PATCH body: `{ amountMinor, categoryId, date, description, notes? }`
   (PATCH: all optional). `amountMinor` integer > 0. `categoryId` must be an
   active category owned by the user. Date must be a valid calendar date;
-  future dates allowed (max 1 year ahead).
+  future dates allowed (max 1 year ahead — enforced in the shared zod
+  schema, so client forms and the API apply the same rule).
 - CSV export: RFC 4180, UTF-8 with BOM (Excel), header row
   `date,category,description,notes,amount,currency`; amount as decimal
   string (`1250.00`); same filters as list; streamed, no pagination.
