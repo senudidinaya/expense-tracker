@@ -1,0 +1,22 @@
+{
+  "name": "expense-tracker",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "lint": "eslint . && prettier --check .",
+    "typecheck": "pnpm -r --parallel typecheck",
+    "test": "pnpm -r test",
+    "build": "pnpm -r build",
+    "dev": "pnpm --parallel --filter @expense/api --filter @expense/web dev"
+  },
+  "devDependencies": {
+    "eslint": "^10.8.0",
+    "typescript-eslint": "^8.66.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.3"
+  }
+}
