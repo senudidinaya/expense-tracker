@@ -1,0 +1,15 @@
+{
+  "name": "@expense/shared",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "build": "tsc -p ."
+  },
+  "devDependencies": {
+    "vitest": "^4.1.10"
+  }
+}
