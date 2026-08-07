@@ -8,14 +8,19 @@ jobs:
     services:
       postgres:
         image: postgres:16
-        env: { POSTGRES_USER: expense, POSTGRES_PASSWORD: expense, POSTGRES_DB: expense }
+        env:
+          {
+            POSTGRES_USER: expense,
+            POSTGRES_PASSWORD: expense,
+            POSTGRES_DB: expense,
+          }
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U expense" --health-interval 5s
           --health-timeout 5s --health-retries 10
     env:
       DATABASE_URL: postgres://expense:expense@localhost:5432/expense
-      TESTCONTAINERS_DISABLED: "1"   # helpers.ts honors this (Step 2 below)
+      TESTCONTAINERS_DISABLED: "1" # helpers.ts honors this (Step 2 below)
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
