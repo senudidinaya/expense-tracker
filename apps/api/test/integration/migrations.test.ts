@@ -4,10 +4,7 @@ import { runMigrations } from "../../src/db/migrate";
 import postgres from "postgres";
 
 let url: string, schema: string, stop: () => Promise<unknown>;
-beforeAll(
-  async () => ({ url, schema, stop } = await startTestDb()),
-  120_000,
-);
+beforeAll(async () => ({ url, schema, stop } = await startTestDb()), 120_000);
 afterAll(() => stop());
 
 it("applies all migrations and creates the six tables + citext", async () => {
