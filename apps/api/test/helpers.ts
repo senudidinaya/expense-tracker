@@ -6,6 +6,21 @@ import { createDb } from "../src/db/client.js";
 import { runMigrations } from "../src/db/migrate.js";
 import type { Env } from "../src/env.js";
 
+/**
+ * Postgres raises NOTICEs that are expected under the schema-per-suite model
+ * and only bury real test output. postgres.js console.logs the whole parsed
+ * notice object unless `onnotice` is set, so every test client sets this.
+ *
+ * The two we provoke on purpose:
+ *  - `schema "test_xxx" already exists, skipping` — drizzle's migrator opens
+ *    with `CREATE SCHEMA IF NOT EXISTS <migrationsSchema>`, and we point it at
+ *    the schema startTestDb created moments earlier. Not a name collision.
+ *  - `extension "citext" already exists, skipping` — 0000_init.sql re-runs
+ *    `CREATE EXTENSION IF NOT EXISTS citext`, which repeats on every suite
+ *    when TESTCONTAINERS_DISABLED=1 makes them share one database.
+ */
+export const silenceNotices = () => {};
+
 export async function startTestDb() {
   const schema = `test_${randomBytes(6).toString("hex")}`;
   let base: string;
@@ -19,7 +34,7 @@ export async function startTestDb() {
       await c.stop();
     };
   }
-  const admin = postgres(base);
+  const admin = postgres(base, { onnotice: silenceNotices });
   await admin.unsafe(`create schema "${schema}"`);
   await admin.end();
   // search_path = suite schema first, then public — unqualified DDL/DML
@@ -30,7 +45,7 @@ export async function startTestDb() {
     url,
     schema,
     stop: async () => {
-      const s = postgres(base);
+      const s = postgres(base, { onnotice: silenceNotices });
       await s.unsafe(`drop schema "${schema}" cascade`);
       await s.end();
       await stopContainer();
@@ -56,8 +71,11 @@ export async function makeTestApp() {
   const { url, schema, stop: stopDb } = await startTestDb();
   // migrationsSchema pins the journal inside this suite's schema — without it
   // parallel suites share `drizzle.__drizzle_migrations` and collide.
-  await runMigrations(url, { migrationsSchema: schema });
-  const { db, sql } = createDb(url);
+  await runMigrations(url, {
+    migrationsSchema: schema,
+    onnotice: silenceNotices,
+  });
+  const { db, sql } = createDb(url, { onnotice: silenceNotices });
   const app = await buildApp({
     db,
     env: testEnv({ DATABASE_URL: url }),
