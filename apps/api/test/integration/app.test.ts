@@ -13,7 +13,7 @@ const UUID_RE =
 
 let app: Awaited<ReturnType<typeof makeTestApp>>["app"];
 let db: Awaited<ReturnType<typeof makeTestApp>>["db"];
-let stop: () => Promise<void>;
+let stop: (() => Promise<void>) | undefined;
 
 beforeAll(async () => {
   ({ app, db, stop } = await makeTestApp());
@@ -40,7 +40,8 @@ beforeAll(async () => {
   await app.ready();
 }, 120_000);
 
-afterAll(() => stop());
+// `stop` is undefined if beforeAll threw; calling it would bury the real error.
+afterAll(() => stop?.());
 
 describe("GET /health", () => {
   it("returns 200 with status and version", async () => {

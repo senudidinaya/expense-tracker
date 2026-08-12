@@ -21,6 +21,22 @@ import type { Env } from "../src/env.js";
  */
 export const silenceNotices = () => {};
 
+/** Same base server, a different database. */
+export function withDatabase(base: string, database: string) {
+  const u = new URL(base);
+  u.pathname = `/${database}`;
+  return u.toString();
+}
+
+/**
+ * search_path = suite schema first, then public — unqualified DDL/DML lands in
+ * the suite schema while the citext type (installed WITH SCHEMA public, Task 2)
+ * still resolves.
+ */
+export function withSearchPath(base: string, schema: string) {
+  return `${base}?options=${encodeURIComponent(`-c search_path=${schema},public`)}`;
+}
+
 export async function startTestDb() {
   const schema = `test_${randomBytes(6).toString("hex")}`;
   let base: string;
@@ -37,12 +53,10 @@ export async function startTestDb() {
   const admin = postgres(base, { onnotice: silenceNotices });
   await admin.unsafe(`create schema "${schema}"`);
   await admin.end();
-  // search_path = suite schema first, then public — unqualified DDL/DML
-  // lands in the suite schema while the citext type (installed WITH
-  // SCHEMA public, Task 2) still resolves.
-  const url = `${base}?options=${encodeURIComponent(`-c search_path=${schema},public`)}`;
+  const url = withSearchPath(base, schema);
   return {
     url,
+    base,
     schema,
     stop: async () => {
       const s = postgres(base, { onnotice: silenceNotices });
