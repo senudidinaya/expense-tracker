@@ -89,11 +89,28 @@ interface Extra {
   remoteAddress?: string;
 }
 
+/**
+ * A distinct client address per call. `/signup` and `/login` are rate-limited to
+ * 10/min per IP (Task 7), and this suite makes far more than ten of each — but
+ * what it is testing is credentials and sessions, not the limiter. Giving every
+ * request its own bucket keeps those assertions about what they say they are
+ * about; the limits themselves are tested in `security.test.ts`.
+ *
+ * With no `X-Forwarded-For` header, `trustProxy: 1` resolves `req.ip` — the
+ * limiter's key — to exactly this socket address.
+ */
+let clients = 0;
+const nextClientAddress = () => {
+  clients += 1;
+  return `10.0.${Math.floor(clients / 250)}.${(clients % 250) + 1}`;
+};
+
 const signup = (email: string, password: string, extra: Extra = {}) =>
   app.inject({
     method: "POST",
     url: "/api/auth/signup",
     payload: { email, password },
+    remoteAddress: nextClientAddress(),
     ...extra,
   });
 
@@ -102,6 +119,7 @@ const login = (email: string, password: string, extra: Extra = {}) =>
     method: "POST",
     url: "/api/auth/login",
     payload: { email, password },
+    remoteAddress: nextClientAddress(),
     ...extra,
   });
 
