@@ -15,3 +15,11 @@ export function createDb(
 }
 
 export type Db = ReturnType<typeof createDb>["db"];
+
+/**
+ * What a repository writes through: the pool itself, or a transaction opened on
+ * it. Repos accept this so a caller can compose several of them into one
+ * transaction — signup creates the user and seeds its categories atomically,
+ * which is only possible if the categories repo will take the caller's `tx`.
+ */
+export type DbOrTx = Db | Parameters<Parameters<Db["transaction"]>[0]>[0];
