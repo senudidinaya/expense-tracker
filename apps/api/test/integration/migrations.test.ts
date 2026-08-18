@@ -5,8 +5,8 @@ import {
   silenceNotices,
   withDatabase,
   withSearchPath,
-} from "../helpers";
-import { runMigrations } from "../../src/db/migrate";
+} from "../helpers.js";
+import { runMigrations } from "../../src/db/migrate.js";
 import postgres from "postgres";
 
 let url: string,
