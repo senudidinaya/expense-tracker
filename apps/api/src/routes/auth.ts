@@ -11,6 +11,7 @@ import type { Db } from "../db/client.js";
 import { dummyPasswordHash, hashSessionToken } from "../lib/crypto.js";
 import { isCommonPassword } from "../lib/password-blocklist.js";
 import { SESSION_COOKIE, currentUserId } from "../plugins/auth.js";
+import { AUTH_RATE_LIMITS } from "../plugins/security.js";
 import { sessionsRepo } from "../repos/sessions.js";
 import { usersRepo, type UserRecord } from "../repos/users.js";
 
@@ -53,6 +54,9 @@ export const authRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (
   app.post(
     "/signup",
     {
+      // Tighter than the global limit: this route creates rows and pays for an
+      // argon2 hash, so it is the cheapest one to abuse.
+      config: { rateLimit: AUTH_RATE_LIMITS.signup },
       schema: {
         body: signupBody,
         response: {
@@ -103,6 +107,9 @@ export const authRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (
   app.post(
     "/login",
     {
+      // The password-guessing surface. 10/min/IP is what turns an online
+      // brute-force into an offline-only problem.
+      config: { rateLimit: AUTH_RATE_LIMITS.login },
       schema: {
         body: loginBody,
         response: {
