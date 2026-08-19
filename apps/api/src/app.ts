@@ -16,7 +16,9 @@ import { z } from "zod";
 import type { Db } from "./db/client.js";
 import type { Env } from "./env.js";
 import { newId } from "./lib/ids.js";
+import { authPlugin } from "./plugins/auth.js";
 import { securityPlugin } from "./plugins/security.js";
+import { authRoutes } from "./routes/auth.js";
 import { healthRoutes } from "./routes/health.js";
 
 /** design/api.md: request body size capped at 32 KB. */
@@ -90,6 +92,9 @@ export async function buildApp({
   });
 
   await app.register(securityPlugin, { env });
+  // After securityPlugin: the session cookie is read through @fastify/cookie,
+  // which that plugin registers. Before the routes, which use `app.authenticate`.
+  await app.register(authPlugin, { db, env });
 
   /**
    * The single place a non-2xx body is produced. Later tasks reply with the
@@ -144,6 +149,7 @@ export async function buildApp({
   );
 
   await app.register(healthRoutes, { db, version: env.APP_VERSION });
+  await app.register(authRoutes, { db, prefix: "/api/auth" });
 
   return app;
 }

@@ -1,4 +1,4 @@
-import type { z } from "zod";
+import { z } from "zod";
 
 /**
  * The complete, stable set of error codes. Clients switch on these, so the
@@ -52,6 +52,31 @@ export const errorEnvelope = (
 ): ErrorEnvelope => ({
   error: { code, message, ...(details !== undefined ? { details } : {}) },
 });
+
+/**
+ * The envelope as a zod schema, for the `response` map of every route that can
+ * answer non-2xx.
+ *
+ * This is not merely a type annotation: fastify compiles a route's response
+ * schema into its serializer, so a status declared here is filtered on the way
+ * out — anything the handler puts on the object that is not `code`, `message` or
+ * `details` never reaches the client. A status left undeclared is serialized
+ * with `JSON.stringify` and whatever it carries goes out verbatim. That filter
+ * is the reason to declare error statuses, not the types.
+ *
+ * `satisfies` rather than a type annotation: it proves the schema and
+ * `ErrorEnvelope` cannot drift apart while leaving the concrete zod type intact
+ * for the type provider to infer from.
+ */
+export const errorResponse = z.object({
+  error: z.object({
+    code: z.enum(ERROR_CODES),
+    message: z.string(),
+    details: z
+      .array(z.object({ path: z.string(), message: z.string() }))
+      .optional(),
+  }),
+}) satisfies z.ZodType<ErrorEnvelope>;
 
 /**
  * Flattens a `ZodError` into the envelope's `details`. Nested and array paths
