@@ -1,7 +1,8 @@
 import { PostgreSqlContainer } from "@testcontainers/postgresql";
+import type { InjectOptions, LightMyRequestResponse } from "fastify";
 import postgres from "postgres";
 import { randomBytes } from "node:crypto";
-import { buildApp } from "../src/app.js";
+import { buildApp, type App } from "../src/app.js";
 import { createDb } from "../src/db/client.js";
 import { runMigrations } from "../src/db/migrate.js";
 import type { Env } from "../src/env.js";
@@ -103,5 +104,100 @@ export async function makeTestApp() {
       await sql.end();
       await stopDb();
     },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Signed-in request helpers
+// ---------------------------------------------------------------------------
+
+export interface TestUser {
+  email: string;
+  password: string;
+  /** The raw session cookie value. */
+  token: string;
+  userId: string;
+}
+
+/**
+ * A distinct client address per request. The global rate limit is 300/min per
+ * IP (Task 7) and a CRUD suite makes more calls than that — but what those
+ * suites test is ownership and CRUD, not the limiter, so every request gets its
+ * own bucket. The limits themselves are tested in `security.test.ts`.
+ *
+ * With no `X-Forwarded-For` header, `trustProxy: 1` resolves `req.ip` — the
+ * limiter's key — to exactly this socket address.
+ */
+let clients = 0;
+export const nextClientAddress = (): string => {
+  clients += 1;
+  return `10.${Math.floor(clients / 62_500) % 250}.${Math.floor(clients / 250) % 250}.${(clients % 250) + 1}`;
+};
+
+/** The `session` cookie value from a response, or a failure that names what happened. */
+function sessionCookieValue(headers: Record<string, unknown>): string {
+  const raw = headers["set-cookie"];
+  const all = raw === undefined ? [] : Array.isArray(raw) ? raw : [raw];
+  const header = all.map(String).find((h) => h.startsWith("session="));
+  if (header === undefined) throw new Error("response set no `session` cookie");
+  const pair = header.split(";")[0] ?? "";
+  return decodeURIComponent(pair.slice("session=".length));
+}
+
+/** Signs up a throwaway account and hands back its credentials and cookie. */
+export async function signupUser(app: App, label: string): Promise<TestUser> {
+  const email = `${label}@example.com`;
+  const password = `pw-${label}-8charsmin`;
+  const r = await app.inject({
+    method: "POST",
+    url: "/api/auth/signup",
+    payload: { email, password },
+    remoteAddress: nextClientAddress(),
+  });
+  if (r.statusCode !== 201) {
+    throw new Error(`signup for "${label}" failed: ${r.statusCode} ${r.body}`);
+  }
+  return {
+    email,
+    password,
+    token: sessionCookieValue(r.headers),
+    userId: r.json().user.id as string,
+  };
+}
+
+/**
+ * A request maker bound to one user's session cookie, so an isolation test reads
+ * as `asB.patch(...)` — the user making the call is part of the sentence rather
+ * than a cookie assembled at each call site.
+ */
+export function asUser(app: App, user: TestUser) {
+  const send = (
+    method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
+    url: string,
+    payload?: InjectOptions["payload"],
+  ): Promise<LightMyRequestResponse> => {
+    // Built as a value rather than spread inline: `inject` is overloaded, and a
+    // conditional spread makes TypeScript resolve the chainable-builder overload
+    // instead of the promise-returning one.
+    const options: InjectOptions = {
+      method,
+      url,
+      cookies: { session: user.token },
+      remoteAddress: nextClientAddress(),
+    };
+    if (payload !== undefined) options.payload = payload;
+    return app.inject(options);
+  };
+
+  return {
+    user,
+    get: (url: string) => send("GET", url),
+    post: (url: string, payload: InjectOptions["payload"]) =>
+      send("POST", url, payload),
+    patch: (url: string, payload: InjectOptions["payload"]) =>
+      send("PATCH", url, payload),
+    put: (url: string, payload: InjectOptions["payload"]) =>
+      send("PUT", url, payload),
+    delete: (url: string) => send("DELETE", url),
   };
 }
