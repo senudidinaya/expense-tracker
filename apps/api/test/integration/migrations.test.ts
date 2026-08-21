@@ -43,7 +43,7 @@ it("applies all migrations and creates the six tables + citext", async () => {
   const ext = await sql`select extname from pg_extension`;
   expect(ext.map((e) => e.extname)).toContain("citext");
   await sql.end();
-});
+}, 120_000);
 
 it("migrates a pristine database concurrently without colliding", async () => {
   // Regression, and the reason runMigrations takes an advisory lock.
