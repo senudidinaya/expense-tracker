@@ -3,6 +3,7 @@ import {
   errorEnvelope,
   errorResponse,
   expenseDto,
+  exportExpensesQuery,
   listExpensesQuery,
   listExpensesResponse,
   patchExpenseBody,
@@ -10,11 +11,23 @@ import {
 } from "@expense/shared";
 import type { FastifyReply } from "fastify";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
+import { Readable } from "node:stream";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
+import {
+  csvRow,
+  CSV_BOM,
+  CSV_EOL,
+  minorToDecimalString,
+  neutralizeFormula,
+} from "../lib/csv.js";
 import { decodeCursor } from "../lib/cursor.js";
 import { currentUserId } from "../plugins/auth.js";
-import { expensesRepo, type ExpenseRecord } from "../repos/expenses.js";
+import {
+  expensesRepo,
+  type ExpenseRecord,
+  type ExportRow,
+} from "../repos/expenses.js";
 
 const expenseResponse = z.object({ expense: expenseDto });
 
@@ -125,6 +138,100 @@ export const expenseRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (
         totalCount,
         ...(totalAmountMinor !== null ? { totalAmountMinor } : {}),
       });
+    },
+  );
+
+  /**
+   * design/api.md: `date,category,description,notes,amount,currency`.
+   *
+   * The header is the one row that is not user data, so it is written as a
+   * literal rather than assembled — if a column is renamed here the change is
+   * visible in the diff next to the row builder below.
+   */
+  const CSV_HEADER = csvRow([
+    "date",
+    "category",
+    "description",
+    "notes",
+    "amount",
+    "currency",
+  ]);
+
+  /**
+   * The three free-text columns pass through `neutralizeFormula` and the three
+   * server-generated ones do not: a date, a decimal string and `LKR` cannot
+   * begin with a formula character, and running the guard over them would be a
+   * claim that they might. `notes` is nullable and becomes an empty field —
+   * a CSV says "no value" with nothing, not with the word "null".
+   */
+  const exportRow = (row: ExportRow): string =>
+    csvRow([
+      row.date,
+      neutralizeFormula(row.categoryName),
+      neutralizeFormula(row.description),
+      neutralizeFormula(row.notes ?? ""),
+      minorToDecimalString(row.amountMinor),
+      row.currency,
+    ]);
+
+  app.get(
+    "/export.csv",
+    {
+      preHandler: app.authenticate,
+      schema: {
+        querystring: exportExpensesQuery,
+        // No 200 schema: the body is a stream of CSV, not a serialized object,
+        // and declaring one would put the zod serializer in front of it.
+        response: { 400: errorResponse, 401: errorResponse },
+      },
+    },
+    async (req, reply) => {
+      const userId = currentUserId(req);
+      const filters = req.query;
+
+      // `attachment` rather than `inline`: the browser saves the file instead
+      // of rendering it, and the fixed filename is what the user sees. It is a
+      // constant, so nothing user-controlled reaches this header — a filename
+      // built from a filter would need RFC 6266 encoding and header-injection
+      // handling to be safe.
+      void reply
+        .header("content-type", "text/csv; charset=utf-8")
+        .header("content-disposition", 'attachment; filename="expenses.csv"');
+
+      /**
+       * The body, produced as it is written.
+       *
+       * The BOM and the header go out before the first query runs, so an empty
+       * export is still a valid CSV with column names. Everything after is one
+       * batch of rows at a time — nothing here holds the whole result set, and
+       * the client starts receiving bytes while Postgres is still reading.
+       *
+       * A failure mid-stream cannot become an error envelope: the 200 and the
+       * headers are already on the wire by then. Fastify destroys the response,
+       * the client sees a truncated body, and the throw is logged — which is
+       * the honest outcome, and the reason the ownership filter and the
+       * validation both happen before the first byte is sent.
+       */
+      async function* csv(): AsyncGenerator<string | Buffer> {
+        yield CSV_BOM;
+        yield CSV_HEADER + CSV_EOL;
+        for await (const row of expensesRepo.streamForExport(
+          db,
+          userId,
+          filters,
+        )) {
+          yield exportRow(row) + CSV_EOL;
+        }
+      }
+
+      // Sent through the base `FastifyReply`: the type provider derives
+      // `send`'s parameter from the declared response schemas, and this route
+      // declares none for 200 precisely because the body is a stream rather
+      // than something the serializer should touch.
+      void (reply as FastifyReply).send(
+        Readable.from(csv(), { objectMode: false }),
+      );
+      return reply;
     },
   );
 

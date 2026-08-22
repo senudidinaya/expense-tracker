@@ -94,6 +94,30 @@ export interface ExpensePage {
   nextCursor: string | null;
 }
 
+/**
+ * One CSV line's worth of expense, with the category's *name* — the export is
+ * read by a person in a spreadsheet, to whom a uuid says nothing. `id` rides
+ * along because it is half the keyset cursor the batched walk pages on; it is
+ * not written to the file.
+ */
+export interface ExportRow {
+  id: string;
+  date: string;
+  categoryName: string;
+  description: string;
+  notes: string | null;
+  amountMinor: number;
+  currency: "LKR";
+}
+
+/**
+ * Rows per round trip in `streamForExport`. Large enough that a normal account
+ * exports in one or two queries, small enough that the whole table is never in
+ * memory at once. Exported so the export test can seed past it and actually
+ * exercise the second batch.
+ */
+export const EXPORT_BATCH_SIZE = 100;
+
 export interface ExpenseTotals {
   totalCount: number;
   /**
@@ -238,6 +262,68 @@ export const expensesRepo = {
       totalCount: row.totalCount,
       totalAmountMinor: Number.isSafeInteger(total) ? total : null,
     };
+  },
+
+  /**
+   * Every matching row, newest first, in batches — the CSV export's source.
+   *
+   * An async generator rather than an array because the export has no
+   * pagination: `select(...)` with no limit is one query whose result set is
+   * however many expenses the user has ever filed, materialised in this
+   * process before the first byte reaches them. Batching keeps the memory
+   * bounded no matter how large the account gets, and the route writes each
+   * batch out as it arrives.
+   *
+   * The paging is the same keyset walk `list` does — `(date, id)` descending,
+   * driven off `expenses_user_date_idx` — and for the same reason: an OFFSET
+   * walk over a table being written to duplicates and skips rows, and an export
+   * that quietly drops one is worse than one that fails.
+   *
+   * The join is an inner join, which is not a filter here: `category_id` is NOT
+   * NULL with an FK, and `ON DELETE RESTRICT` means the category cannot vanish
+   * out from under an expense. It supplies the name for column 2.
+   */
+  async *streamForExport(
+    db: Db,
+    userId: string,
+    f: ExpenseFilters,
+  ): AsyncGenerator<ExportRow> {
+    let cursor: Cursor | null = null;
+
+    for (;;) {
+      const where = filterConditions(userId, f);
+      if (cursor) {
+        where.push(
+          sql`(${expenses.date}, ${expenses.id}) < (${cursor.date}::date, ${cursor.id}::uuid)`,
+        );
+      }
+
+      const rows = await db
+        .select({
+          id: expenses.id,
+          date: expenses.date,
+          categoryName: categories.name,
+          description: expenses.description,
+          notes: expenses.notes,
+          amountMinor: expenses.amountMinor,
+          currency: expenses.currency,
+        })
+        .from(expenses)
+        .innerJoin(categories, eq(categories.id, expenses.categoryId))
+        .where(and(...where))
+        .orderBy(desc(expenses.date), desc(expenses.id))
+        .limit(EXPORT_BATCH_SIZE);
+
+      for (const row of rows) yield row;
+
+      // A short batch is the last batch. Asking for one more row to find out,
+      // the way `list` does, would only tell us what a short read already has.
+      if (rows.length < EXPORT_BATCH_SIZE) return;
+
+      const last = rows.at(-1);
+      if (last === undefined) return;
+      cursor = { date: last.date, id: last.id };
+    }
   },
 
   async create(
