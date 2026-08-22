@@ -3,6 +3,7 @@ import {
   errorEnvelope,
   errorResponse,
   expenseDto,
+  listExpensesQuery,
   listExpensesResponse,
   patchExpenseBody,
   uuid,
@@ -11,6 +12,7 @@ import type { FastifyReply } from "fastify";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
+import { decodeCursor } from "../lib/cursor.js";
 import { currentUserId } from "../plugins/auth.js";
 import { expensesRepo, type ExpenseRecord } from "../repos/expenses.js";
 
@@ -67,12 +69,62 @@ export const expenseRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (
     "/",
     {
       preHandler: app.authenticate,
-      schema: { response: { 200: listExpensesResponse, 401: errorResponse } },
+      schema: {
+        querystring: listExpensesQuery,
+        response: {
+          200: listExpensesResponse,
+          400: errorResponse,
+          401: errorResponse,
+        },
+      },
     },
     async (req, reply) => {
-      const items = await expensesRepo.list(db, currentUserId(req));
-      // Task 9 adds the filters, the keyset cursor and the first-page totals.
-      return reply.send({ items: items.map(toDto), nextCursor: null });
+      const { cursor: rawCursor, limit, ...filters } = req.query;
+
+      // Decoded here rather than in the zod schema: `listExpensesQuery` is the
+      // shared contract and the web app has no use for a decoded cursor, so the
+      // shape of the token stays a server-side concern.
+      const cursor = rawCursor === undefined ? null : decodeCursor(rawCursor);
+      if (rawCursor !== undefined && cursor === null) {
+        return reply
+          .code(400)
+          .send(
+            errorEnvelope("validation_failed", "Invalid request", [
+              { path: "cursor", message: "cursor is not a valid cursor" },
+            ]),
+          );
+      }
+
+      const userId = currentUserId(req);
+      const page = await expensesRepo.list(db, userId, {
+        ...filters,
+        cursor,
+        limit,
+      });
+      const body = {
+        items: page.items.map(toDto),
+        nextCursor: page.nextCursor,
+      };
+
+      // design/api.md: totals come back on the first page only. They are a
+      // full-scan aggregate over the filters, and the answer does not change as
+      // the client pages — recomputing it per page would be the same number for
+      // the same cost, every time.
+      if (cursor !== null) return reply.send(body);
+
+      const { totalCount, totalAmountMinor } = await expensesRepo.totals(
+        db,
+        userId,
+        filters,
+      );
+      // `totalAmountMinor` is dropped rather than rounded when the sum is past
+      // the exact-integer ceiling — see `ExpenseTotals`. A first page is still
+      // distinguishable from a cursor page, which omits `totalCount` too.
+      return reply.send({
+        ...body,
+        totalCount,
+        ...(totalAmountMinor !== null ? { totalAmountMinor } : {}),
+      });
     },
   );
 
