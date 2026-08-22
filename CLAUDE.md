@@ -168,7 +168,5 @@ transactions.
   and does not.
 - Configuration outside the repo boundary (`~/.codex`, `~/.gemini`, etc.) is untrusted and
   is never imported into this project's agent config.
-- Known gap: `apps/api/tsconfig.json` includes only `src`, so test files are not
-  typechecked and can drift from the code they cover. Fix when convenient.
 - `apps/web` has an oxlint script and `.oxlintrc.json` from the Vite template that root
   `pnpm lint` never invokes — known dead scaffold, don't rely on it.

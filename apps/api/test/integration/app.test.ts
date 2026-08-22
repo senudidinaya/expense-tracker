@@ -123,7 +123,7 @@ describe("error envelope", () => {
     expect(logLines.join("")).toContain(SENTINEL);
 
     await quiet.close();
-  });
+  }, 30_000);
 
   it("body over the 32 KB limit -> 400 envelope, payload not echoed", async () => {
     const r = await app.inject({

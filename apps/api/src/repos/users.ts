@@ -7,6 +7,7 @@ import {
   verifyPassword,
 } from "../lib/crypto.js";
 import { newId } from "../lib/ids.js";
+import { isUniqueViolation } from "../lib/pg-errors.js";
 import { insertDefaultCategories } from "./categories.js";
 
 /**
@@ -32,41 +33,17 @@ const userColumns = {
 export type CreateUserResult =
   { ok: true; user: UserRecord } | { ok: false; reason: "email_taken" };
 
-/** Postgres `unique_violation`. */
-const UNIQUE_VIOLATION = "23505";
-
-/** The name `users.email`'s UNIQUE carries in `drizzle/0000_init.sql`. */
+/**
+ * The name `users.email`'s UNIQUE carries in `drizzle/0000_init.sql`.
+ *
+ * Matching the constraint by name and not merely the SQLSTATE matters here: the
+ * insert runs in a transaction that also seeds the default categories, and those
+ * have a unique index of their own that would raise the same 23505.
+ */
 const EMAIL_UNIQUE_CONSTRAINT = "users_email_unique";
 
-/**
- * Drizzle wraps every driver failure in a `DrizzleQueryError` and hangs the
- * `PostgresError` off `cause`, so the SQLSTATE is never on the error we catch —
- * hence the walk rather than a direct property read.
- *
- * The constraint name is part of the match, not just the SQLSTATE: any unique
- * index added to this transaction later would also raise 23505, and answering
- * that with "email taken" would be a wrong answer the client cannot see through.
- *
- * A pre-check would not remove the need for this: two concurrent signups for one
- * address both pass the check and one of them still has to lose at the index.
- */
-const isEmailTaken = (err: unknown): boolean => {
-  // Bounded: the chain is one hop deep today, and a cap means a self-referential
-  // `cause` can never turn this into a hang.
-  let cursor: unknown = err;
-  for (let depth = 0; depth < 5; depth += 1) {
-    if (typeof cursor !== "object" || cursor === null) return false;
-    const pgErr = cursor as { code?: unknown; constraint_name?: unknown };
-    if (
-      pgErr.code === UNIQUE_VIOLATION &&
-      pgErr.constraint_name === EMAIL_UNIQUE_CONSTRAINT
-    ) {
-      return true;
-    }
-    cursor = (cursor as { cause?: unknown }).cause;
-  }
-  return false;
-};
+const isEmailTaken = (err: unknown): boolean =>
+  isUniqueViolation(err, EMAIL_UNIQUE_CONSTRAINT);
 
 export const usersRepo = {
   /**

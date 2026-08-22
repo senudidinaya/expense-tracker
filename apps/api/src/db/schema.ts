@@ -84,7 +84,15 @@ export const expenses = pgTable(
       },
     ),
     amountMinor: bigint("amount_minor", { mode: "number" }).notNull(),
-    currency: char("currency", { length: 3 }).notNull().default("LKR"),
+    // `$type` is type-level only — no SQL changes, nothing for drizzle-kit to
+    // regenerate. It just teaches TypeScript what the CHECK below already
+    // guarantees, so the wire contract's `z.literal("LKR")` is satisfied by the
+    // column rather than by a cast at the HTTP boundary. Widening the CHECK is
+    // the multi-currency upgrade path; this annotation widens with it.
+    currency: char("currency", { length: 3 })
+      .$type<"LKR">()
+      .notNull()
+      .default("LKR"),
     date: date("date").notNull(),
     description: text("description").notNull(),
     notes: text("notes"),
@@ -126,7 +134,11 @@ export const budgets = pgTable(
       .references(() => categories.id, { onDelete: "restrict" }),
     monthStart: date("month_start").notNull(),
     amountMinor: bigint("amount_minor", { mode: "number" }),
-    currency: char("currency", { length: 3 }).notNull().default("LKR"),
+    // Same `$type` reasoning as `expenses.currency` above.
+    currency: char("currency", { length: 3 })
+      .$type<"LKR">()
+      .notNull()
+      .default("LKR"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -163,7 +175,11 @@ export const recurringRules = pgTable(
       .notNull()
       .references(() => categories.id, { onDelete: "restrict" }),
     amountMinor: bigint("amount_minor", { mode: "number" }).notNull(),
-    currency: char("currency", { length: 3 }).notNull().default("LKR"),
+    // Same `$type` reasoning as `expenses.currency` above.
+    currency: char("currency", { length: 3 })
+      .$type<"LKR">()
+      .notNull()
+      .default("LKR"),
     description: text("description").notNull(),
     notes: text("notes"),
     frequency: text("frequency").notNull(),
