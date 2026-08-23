@@ -33,7 +33,16 @@ export const patchExpenseBody = createExpenseBody.partial();
  *  limit does not apply to a query string. */
 const MAX_CATEGORY_FILTERS = 50;
 
-export const listExpensesQuery = z.object({
+/**
+ * What "filter the expenses" means, in one place.
+ *
+ * The list and the CSV export take the same filters — design/api.md says so of
+ * the export in as many words — and the only way two endpoints stay honest
+ * about that is to share the schema rather than to each declare their own copy
+ * of four optional fields. Pagination is what differs, so pagination is what
+ * gets added on top.
+ */
+export const expenseFiltersQuery = z.object({
   from: isoDate.optional(),
   to: isoDate.optional(),
   categoryIds: z
@@ -42,9 +51,19 @@ export const listExpensesQuery = z.object({
     .pipe(z.array(uuid).max(MAX_CATEGORY_FILTERS))
     .optional(),
   q: z.string().max(100).optional(),
+});
+
+export const listExpensesQuery = expenseFiltersQuery.extend({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
+
+/**
+ * The export streams every matching row, so it has no cursor and no limit —
+ * it is the filters and nothing else. Unknown keys are stripped (zod default),
+ * so a client that sends `limit` gets the whole file rather than an error.
+ */
+export const exportExpensesQuery = expenseFiltersQuery;
 
 /** Output. */
 export const expenseDto = z.object({
@@ -70,6 +89,8 @@ export const listExpensesResponse = z.object({
 
 export type CreateExpenseBody = z.infer<typeof createExpenseBody>;
 export type PatchExpenseBody = z.infer<typeof patchExpenseBody>;
+export type ExpenseFiltersQuery = z.infer<typeof expenseFiltersQuery>;
 export type ListExpensesQuery = z.infer<typeof listExpensesQuery>;
+export type ExportExpensesQuery = z.infer<typeof exportExpensesQuery>;
 export type Expense = z.infer<typeof expenseDto>;
 export type ListExpensesResponse = z.infer<typeof listExpensesResponse>;

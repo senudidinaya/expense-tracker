@@ -15,6 +15,7 @@ import {
   expenseDto,
   isoDate,
   isoMonth,
+  exportExpensesQuery,
   listExpensesQuery,
   listExpensesResponse,
   loginBody,
@@ -499,6 +500,42 @@ describe("listExpensesQuery", () => {
     expect(listExpensesQuery.safeParse({ from: "2025-02-31" }).success).toBe(
       false,
     );
+  });
+});
+
+/**
+ * design/api.md: the CSV export takes "same filters as list". The two schemas
+ * are built from one base so that sentence is enforced rather than documented —
+ * a filter added to the list and forgotten on the export is not expressible.
+ */
+describe("exportExpensesQuery", () => {
+  it("is the list query with pagination removed, and nothing else", () => {
+    expect(Object.keys(exportExpensesQuery.shape).sort()).toEqual(
+      Object.keys(listExpensesQuery.shape)
+        .filter((k) => k !== "cursor" && k !== "limit")
+        .sort(),
+    );
+  });
+
+  it("applies the same filter rules as the list", () => {
+    expect(exportExpensesQuery.safeParse({ q: "a".repeat(101) }).success).toBe(
+      false,
+    );
+    expect(exportExpensesQuery.safeParse({ from: "2025-02-31" }).success).toBe(
+      false,
+    );
+    expect(
+      exportExpensesQuery.parse({ categoryIds: `${CATEGORY_ID},${RULE_ID}` })
+        .categoryIds,
+    ).toEqual([CATEGORY_ID, RULE_ID]);
+  });
+
+  it("strips pagination rather than honouring it", () => {
+    const parsed: Record<string, unknown> = exportExpensesQuery.parse({
+      limit: "1",
+      cursor: "abc",
+    });
+    expect(parsed).toEqual({});
   });
 
   it("parses a list response with first-page totals", () => {
