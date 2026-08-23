@@ -19,6 +19,29 @@ Companion to `design/schema.md`.
   repository layer. Requesting another user's resource id → `404` (not
   `403` — existence is not leaked).
 
+## Aggregated money and the exact-integer ceiling
+
+`amountMinor` is capped per row at 2^53 − 1, the largest integer a JSON number
+carries exactly. Nothing caps a *sum* of legal rows: two at the cap already
+exceed it.
+
+Every endpoint that aggregates money follows the same rule:
+
+- The sum is kept as text from Postgres and range-checked before conversion.
+  Reading it as a number first destroys the evidence of the overflow.
+- Past the ceiling, the money field is **omitted from the response**, never
+  rounded. Rounding is exactly the lossy money the integer-minor-units rule
+  exists to prevent.
+- Counts are unaffected — `count(*)` is bounded by the row count — and still
+  come back, so a response with an omitted total is distinguishable from one
+  that was never computed.
+
+Applies to `GET /api/expenses` first-page totals and to every reports endpoint.
+
+This is unreachable with real spending — 2^53 minor units is roughly 90 trillion
+rupees — but it is the boundary the per-row cap implies, and five endpoints
+deciding it separately would decide it differently.
+
 ## Error envelope
 
 Every non-2xx response:
