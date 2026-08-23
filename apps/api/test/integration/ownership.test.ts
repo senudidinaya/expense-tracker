@@ -190,6 +190,10 @@ describe("lists are scoped, never filtered client-side", () => {
   });
 });
 
+/** `expensesRepo.list` with no filters and the default page size. */
+const listAll = (userId: string) =>
+  expensesRepo.list(db, userId, { limit: 50 });
+
 /**
  * The empty case is where an unscoped query gives itself away. A `WHERE` that
  * forgot `user_id` still looks right for a user who owns rows — it returns
@@ -199,12 +203,14 @@ describe("lists are scoped, never filtered client-side", () => {
  */
 describe("a repository query for a user that owns nothing returns empty", () => {
   it("expensesRepo.list returns [] for a user id with no rows, while A's row exists", async () => {
-    expect(await expensesRepo.list(db, userA.userId)).toHaveLength(1);
+    // `list` pages, so the rows are under `items`; the page size is irrelevant
+    // to what this asserts, which is who the rows belong to.
+    expect((await listAll(userA.userId)).items).toHaveLength(1);
 
     // A real signed-up user with categories but no expenses...
-    expect(await expensesRepo.list(db, userB.userId)).toEqual([]);
+    expect((await listAll(userB.userId)).items).toEqual([]);
     // ...and an id that is not a user at all. No throw, no rows.
-    expect(await expensesRepo.list(db, NOWHERE_ID)).toEqual([]);
+    expect((await listAll(NOWHERE_ID)).items).toEqual([]);
   });
 
   it("categoriesRepo.listAll returns [] for a user id that owns nothing", async () => {

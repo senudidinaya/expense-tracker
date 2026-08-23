@@ -1,7 +1,8 @@
 import type { CreateExpenseBody, PatchExpenseBody } from "@expense/shared";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { categories, expenses } from "../db/schema.js";
+import { encodeCursor, type Cursor } from "../lib/cursor.js";
 import { newId } from "../lib/ids.js";
 
 /** Everything a caller outside this file may know about an expense. */
@@ -70,6 +71,72 @@ async function categoryUsable(
   return row.archivedAt === null ? "ok" : "category_archived";
 }
 
+/** The list filters, shared by the page query and the totals query. */
+export interface ExpenseFilters {
+  /** Inclusive lower bound, `YYYY-MM-DD`. */
+  from?: string | undefined;
+  /** Inclusive upper bound, `YYYY-MM-DD`. */
+  to?: string | undefined;
+  categoryIds?: string[] | undefined;
+  /** Case-insensitive substring of `description`. */
+  q?: string | undefined;
+}
+
+export interface ListOptions extends ExpenseFilters {
+  /** `null` on the first page; a decoded position on every page after it. */
+  cursor?: Cursor | null;
+  limit: number;
+}
+
+export interface ExpensePage {
+  items: ExpenseRecord[];
+  /** `null` when this is the last page. */
+  nextCursor: string | null;
+}
+
+export interface ExpenseTotals {
+  totalCount: number;
+  /**
+   * `null` when the sum is past the largest integer a JSON number carries
+   * exactly. The per-row CHECK caps a single `amount_minor` at 2^53 - 1, but
+   * nothing caps a sum of legal rows — two at the ceiling already exceed it.
+   * Rounding would be precisely the lossy money the integer-minor-units rule
+   * exists to prevent, so the caller is told there is no exact answer instead.
+   */
+  totalAmountMinor: number | null;
+}
+
+/** `%`, `_` and `\` are LIKE syntax; a user searching for them means the characters. */
+const LIKE_SPECIAL = /[\\%_]/g;
+
+/**
+ * design/api.md: `q` is an ILIKE substring match on `description`, capped at 100
+ * characters, and the `%term%` scan is knowingly non-indexed — fine at per-user
+ * v1 volumes, with a trigram index as the documented upgrade path.
+ *
+ * The escape is not optional: unescaped, a `q` of `%` becomes the pattern `%%%`
+ * and matches every row, which is a filter that silently does the opposite of
+ * what it says.
+ */
+const descriptionMatches = (q: string): SQL =>
+  sql`${expenses.description} ilike ${`%${q.replace(LIKE_SPECIAL, (c) => `\\${c}`)}%`} escape '\\'`;
+
+/**
+ * The `user_id` predicate is first and unconditional — it is the ownership
+ * boundary, not a filter, and building it here is what stops the page query and
+ * the totals query from drifting apart about who owns what.
+ */
+function filterConditions(userId: string, f: ExpenseFilters): SQL[] {
+  const where: SQL[] = [eq(expenses.userId, userId)];
+  if (f.from !== undefined) where.push(gte(expenses.date, f.from));
+  if (f.to !== undefined) where.push(lte(expenses.date, f.to));
+  if (f.categoryIds !== undefined) {
+    where.push(inArray(expenses.categoryId, f.categoryIds));
+  }
+  if (f.q !== undefined && f.q !== "") where.push(descriptionMatches(f.q));
+  return where;
+}
+
 /**
  * Every method takes `userId` and puts it in the WHERE — including the reads.
  * An unscoped SELECT here looks correct for a user who owns rows and returns the
@@ -90,17 +157,87 @@ export const expensesRepo = {
   },
 
   /**
-   * Task 9 adds the filters, the keyset cursor and the first-page totals. The
-   * ordering is already the one the cursor will compare on — `(date, id)`
-   * descending, matching `expenses_user_date_idx` — so pagination slots into
-   * this query rather than replacing it.
+   * One page of the filtered list, newest first.
+   *
+   * The sort is `(date, id)` descending, which `expenses_user_date_idx` is built
+   * to serve, and the cursor compares on the same tuple: `(date, id) < (d, i)`
+   * as a single row comparison rather than `date < d OR (date = d AND id < i)`.
+   * The two are equivalent, but the row form is the one Postgres can drive
+   * straight off the index, and it cannot be got subtly wrong the way the
+   * expanded boolean can.
+   *
+   * `id` is in the sort key because `date` is not unique — several expenses a
+   * day is the normal case, and without a tiebreak their relative order is
+   * whatever the plan happens to produce, which is enough to duplicate or drop
+   * rows at a page boundary.
    */
-  async list(db: Db, userId: string): Promise<ExpenseRecord[]> {
-    return db
+  async list(db: Db, userId: string, opts: ListOptions): Promise<ExpensePage> {
+    const where = filterConditions(userId, opts);
+    if (opts.cursor) {
+      // The casts are explicit because the comparison is what tells Postgres
+      // these parameters are a date and a uuid rather than text.
+      where.push(
+        sql`(${expenses.date}, ${expenses.id}) < (${opts.cursor.date}::date, ${opts.cursor.id}::uuid)`,
+      );
+    }
+
+    // One row past the page. Whether it exists is the entire "is there another
+    // page?" question, and it costs one row instead of a second count query —
+    // and unlike `totalCount > offset + limit` it stays correct when a row is
+    // written between the two calls.
+    const rows = await db
       .select(expenseColumns)
       .from(expenses)
-      .where(eq(expenses.userId, userId))
-      .orderBy(desc(expenses.date), desc(expenses.id));
+      .where(and(...where))
+      .orderBy(desc(expenses.date), desc(expenses.id))
+      .limit(opts.limit + 1);
+
+    const items = rows.slice(0, opts.limit);
+    const last = items.at(-1);
+    const nextCursor =
+      rows.length > opts.limit && last !== undefined
+        ? encodeCursor({ date: last.date, id: last.id })
+        : null;
+
+    return { items, nextCursor };
+  },
+
+  /**
+   * `count(*)` and `sum(amount_minor)` over the same filters as `list`, in SQL.
+   *
+   * Summing the returned page in JS would be a different number: the page is at
+   * most `limit` rows and the totals describe every matching row. Aggregating in
+   * the database is also the only version that stays one round trip as the row
+   * count grows.
+   *
+   * `sum` over `bigint` returns `numeric`, which Postgres can carry far past
+   * what a JS number represents exactly. It is kept as text all the way here so
+   * the range check happens *before* the conversion that would round it — read
+   * as a number first and the evidence of the overflow is already gone.
+   */
+  async totals(
+    db: Db,
+    userId: string,
+    f: ExpenseFilters,
+  ): Promise<ExpenseTotals> {
+    const [row] = await db
+      .select({
+        // `count(*)` is bounded by the number of rows, so it cannot overflow.
+        totalCount: sql<number>`count(*)`.mapWith(Number),
+        sumText: sql<string>`coalesce(sum(${expenses.amountMinor}), 0)::text`,
+      })
+      .from(expenses)
+      .where(and(...filterConditions(userId, f)));
+
+    // An aggregate with no GROUP BY always returns exactly one row; the fallback
+    // is for `noUncheckedIndexedAccess`, not for a case that can happen.
+    if (!row) return { totalCount: 0, totalAmountMinor: 0 };
+
+    const total = Number(row.sumText);
+    return {
+      totalCount: row.totalCount,
+      totalAmountMinor: Number.isSafeInteger(total) ? total : null,
+    };
   },
 
   async create(
