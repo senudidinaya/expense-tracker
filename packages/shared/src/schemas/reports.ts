@@ -26,26 +26,40 @@ export const budgetStatusQuery = z.object({
 });
 
 /**
+ * A money field that is a *sum* of rows. Per design/api.md ("Aggregated money
+ * and the exact-integer ceiling"): each row is capped at 2^53 - 1, nothing
+ * caps a sum of legal rows, and past the ceiling the field is omitted rather
+ * than rounded. Optional, then, means "no exact answer exists" — never "not
+ * computed". Counts and ratios are not sums and are never omitted.
+ */
+const aggregatedMinor = moneyMinor.optional();
+
+/**
  * Output. `avgMinor` is the one non-integer money value in the contract: it is
  * a computed statistic, not an amount anything is ever charged, so rounding it
- * to minor units would report a total that does not match the sum.
+ * to minor units would report a total that does not match the sum. It is never
+ * omitted: an average of capped rows cannot exceed the cap.
  * `deltaPct` is null when the previous period had no spending — the change from
  * zero has no percentage, and 0 would read as "no change".
  */
 export const summaryResponse = z.object({
-  totalMinor: moneyMinor,
+  totalMinor: aggregatedMinor,
   count: z.int().nonnegative(),
   avgMinor: z.number().nonnegative(),
-  prevPeriodTotalMinor: moneyMinor,
+  prevPeriodTotalMinor: aggregatedMinor,
   deltaPct: z.number().nullable(),
 });
 
-/** `share` is a fraction of the range total, so it is bounded by 1. */
+/**
+ * `share` is a fraction of the range total, so it is bounded by 1. Shares sum
+ * to 1 whenever `items` is non-empty; a range with no spending has no items,
+ * not items with a 0/0 share.
+ */
 export const byCategoryResponse = z.object({
   items: z.array(
     z.object({
       categoryId: uuid,
-      totalMinor: moneyMinor,
+      totalMinor: aggregatedMinor,
       share: z.number().min(0).max(1),
     }),
   ),
@@ -56,25 +70,30 @@ export const trendResponse = z.object({
   items: z.array(
     z.object({
       month: isoMonth,
-      totalMinor: moneyMinor,
+      totalMinor: aggregatedMinor,
     }),
   ),
 });
 
 /**
  * Output. Unbudgeted categories carry `budgetMinor: null`, and with no budget
- * there is nothing to remain or be a percentage of. `remainingMinor` goes
- * negative on overspend and `pct` past 1 — both are the point of the report,
- * so neither is clamped.
+ * there is nothing to remain or be a percentage of — `pct` is also null for a
+ * budget of 0, which has no percentage either. `remainingMinor` goes negative
+ * on overspend and `pct` past 1 — both are the point of the report, so neither
+ * is clamped.
+ *
+ * `spentMinor` is a sum and follows the ceiling rule; `remainingMinor` and
+ * `pct` are derived from it and are omitted with it. `budgetMinor` is a single
+ * stored row and is always present.
  */
 export const budgetStatusResponse = z.object({
   items: z.array(
     z.object({
       categoryId: uuid,
       budgetMinor: moneyMinor.nullable(),
-      spentMinor: moneyMinor,
-      remainingMinor: z.int().nullable(),
-      pct: z.number().nonnegative().nullable(),
+      spentMinor: aggregatedMinor,
+      remainingMinor: z.int().nullable().optional(),
+      pct: z.number().nonnegative().nullable().optional(),
     }),
   ),
 });

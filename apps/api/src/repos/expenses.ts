@@ -4,6 +4,7 @@ import type { Db } from "../db/client.js";
 import { categories, expenses } from "../db/schema.js";
 import { encodeCursor, type Cursor } from "../lib/cursor.js";
 import { newId } from "../lib/ids.js";
+import { exactMinorOrNull } from "../lib/money.js";
 import { categoriesRepo } from "./categories.js";
 
 /** Everything a caller outside this file may know about an expense. */
@@ -23,8 +24,12 @@ export interface ExpenseRecord {
   updatedAt: Date;
 }
 
-/** Selected explicitly so `user_id` never rides along into a response. */
-const expenseColumns = {
+/**
+ * Selected explicitly so `user_id` never rides along into a response. Exported
+ * for the one other read of whole expense rows, the top-expenses report, so it
+ * cannot project a different shape.
+ */
+export const expenseColumns = {
   id: expenses.id,
   categoryId: expenses.categoryId,
   recurringRuleId: expenses.recurringRuleId,
@@ -207,9 +212,9 @@ export const expensesRepo = {
    * count grows.
    *
    * `sum` over `bigint` returns `numeric`, which Postgres can carry far past
-   * what a JS number represents exactly. It is kept as text all the way here so
-   * the range check happens *before* the conversion that would round it — read
-   * as a number first and the evidence of the overflow is already gone.
+   * what a JS number represents exactly. It is kept as text all the way to
+   * `exactMinorOrNull` (`lib/money.ts`), the one range check every aggregating
+   * endpoint shares.
    */
   async totals(
     db: Db,
@@ -229,10 +234,9 @@ export const expensesRepo = {
     // is for `noUncheckedIndexedAccess`, not for a case that can happen.
     if (!row) return { totalCount: 0, totalAmountMinor: 0 };
 
-    const total = Number(row.sumText);
     return {
       totalCount: row.totalCount,
-      totalAmountMinor: Number.isSafeInteger(total) ? total : null,
+      totalAmountMinor: exactMinorOrNull(row.sumText),
     };
   },
 

@@ -823,6 +823,39 @@ describe("report schemas", () => {
     ).toBe(false);
   });
 
+  it("lets an aggregated total be omitted past the exact-integer ceiling, never rounded", () => {
+    // design/api.md: a sum of capped rows can exceed 2^53 - 1; the field is
+    // then absent. Counts and ratios are never optional.
+    expect(
+      summaryResponse.parse({
+        count: 2,
+        avgMinor: 9007199254740991,
+        deltaPct: 1,
+      }),
+    ).toEqual({ count: 2, avgMinor: 9007199254740991, deltaPct: 1 });
+    expect(
+      summaryResponse.safeParse({
+        totalMinor: 9007199254740992,
+        count: 2,
+        avgMinor: 0,
+        deltaPct: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      byCategoryResponse.parse({
+        items: [{ categoryId: CATEGORY_ID, share: 1 }],
+      }).items[0],
+    ).toEqual({ categoryId: CATEGORY_ID, share: 1 });
+    expect(
+      trendResponse.parse({ items: [{ month: "2026-01" }] }).items[0],
+    ).toEqual({ month: "2026-01" });
+    expect(
+      budgetStatusResponse.parse({
+        items: [{ categoryId: CATEGORY_ID, budgetMinor: 5000 }],
+      }).items[0],
+    ).toEqual({ categoryId: CATEGORY_ID, budgetMinor: 5000 });
+  });
+
   it("parses the by-category response", () => {
     expect(
       byCategoryResponse.parse({
