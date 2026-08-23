@@ -57,6 +57,17 @@ export type CategoryResult =
   | { ok: false; reason: "not_found" }
   | { ok: false; reason: "name_taken" };
 
+/**
+ * The answer to "may this user file something under this category?" — asked by
+ * expenses on create and re-categorize, and by budgets on PUT.
+ *
+ * The two failures are different answers, not two words for one. A category
+ * that is not the user's is 404, because existence is not leaked; one that is
+ * theirs but archived is 400, because they can see it and the refusal is about
+ * what it is for, not whether it is there.
+ */
+export type CategoryCheck = "ok" | "category_not_found" | "category_archived";
+
 /** The partial unique index from design/schema.md: (user_id, lower(name)) where archived_at is null. */
 const ACTIVE_NAME_UNIQUE = "categories_user_name_active_uq";
 
@@ -88,6 +99,30 @@ export const categoriesRepo = {
         // order a client sees agrees with the order names collide in.
         .orderBy(asc(sql`lower(${categories.name})`), asc(categories.id))
     );
+  },
+
+  /**
+   * Ownership and archived-ness in one query, for the writes that reference a
+   * category rather than being one.
+   *
+   * Deliberately not run inside a transaction with the write that follows. A
+   * category archived in the gap would only mean a row filed a moment before
+   * the archive, which is a state the app allows anyway — archiving never
+   * invalidates what already points at the category.
+   */
+  async checkUsable(
+    db: Db,
+    userId: string,
+    categoryId: string,
+  ): Promise<CategoryCheck> {
+    const [row] = await db
+      .select({ archivedAt: categories.archivedAt })
+      .from(categories)
+      .where(and(eq(categories.userId, userId), eq(categories.id, categoryId)))
+      .limit(1);
+
+    if (!row) return "category_not_found";
+    return row.archivedAt === null ? "ok" : "category_archived";
   },
 
   async findById(

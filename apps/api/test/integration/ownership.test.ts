@@ -154,10 +154,10 @@ describe("B cannot reach A's category", () => {
     expect(mine?.archivedAt).toBeNull();
   });
 
-  // Task 11 lands `PUT /api/budgets`. Written now rather than left as a comment
-  // so unskipping is the whole of the change; a TODO would have to be rewritten
+  // Written in Task 8, before `PUT /api/budgets` existed, so that unskipping it
+  // in Task 11 was the whole of the change; a TODO would have to be rewritten
   // from scratch, which is how an isolation case quietly never gets one.
-  it.skip("cannot PUT a budget on it -> 404 (unskip in Task 11)", async () => {
+  it("cannot PUT a budget on it -> 404", async () => {
     const r = await asB.put("/api/budgets", {
       categoryId: catA.id,
       month: "2026-03",
@@ -256,6 +256,25 @@ describe("the 404 for another user's id is indistinguishable from a 404 for no i
     });
     const noRow = await asB.patch(`/api/categories/${NOWHERE_ID}`, {
       name: "Renamed",
+    });
+
+    expect(othersRow.statusCode).toBe(404);
+    expect(noRow.statusCode).toBe(404);
+    expect(noRow.body).toBe(othersRow.body);
+  });
+
+  it("PUT /api/budgets with another user's categoryId", async () => {
+    // A budget row points at a category, so the same oracle is available here:
+    // if "not yours" and "not there" differ, PUT becomes a way to test whether
+    // a category id exists without owning it.
+    const body = { month: "2026-03", amountMinor: 500_000 };
+    const othersRow = await asB.put("/api/budgets", {
+      ...body,
+      categoryId: catA.id,
+    });
+    const noRow = await asB.put("/api/budgets", {
+      ...body,
+      categoryId: NOWHERE_ID,
     });
 
     expect(othersRow.statusCode).toBe(404);
