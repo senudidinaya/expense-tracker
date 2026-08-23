@@ -4,6 +4,7 @@ import type { Db } from "../db/client.js";
 import { categories, expenses } from "../db/schema.js";
 import { encodeCursor, type Cursor } from "../lib/cursor.js";
 import { newId } from "../lib/ids.js";
+import { categoriesRepo } from "./categories.js";
 
 /** Everything a caller outside this file may know about an expense. */
 export interface ExpenseRecord {
@@ -41,35 +42,6 @@ export type ExpenseResult =
   | { ok: false; reason: "not_found" }
   | { ok: false; reason: "category_not_found" }
   | { ok: false; reason: "category_archived" };
-
-type CategoryCheck = "ok" | "category_not_found" | "category_archived";
-
-/**
- * design/api.md: an expense's category must be one the user owns and it must be
- * active. The two failures are kept apart because they are different answers —
- * a category that is not the user's is 404 (existence is not leaked), one that
- * is theirs but archived is 400 (they can see it, they just cannot file new
- * spending under it).
- *
- * Deliberately not inside a transaction with the write that follows. A category
- * archived in the gap would only mean an expense filed a moment before the
- * archive, which is a state the app allows anyway — archiving never invalidates
- * existing expenses, and they stay in filters and reports.
- */
-async function categoryUsable(
-  db: Db,
-  userId: string,
-  categoryId: string,
-): Promise<CategoryCheck> {
-  const [row] = await db
-    .select({ archivedAt: categories.archivedAt })
-    .from(categories)
-    .where(and(eq(categories.userId, userId), eq(categories.id, categoryId)))
-    .limit(1);
-
-  if (!row) return "category_not_found";
-  return row.archivedAt === null ? "ok" : "category_archived";
-}
 
 /** The list filters, shared by the page query and the totals query. */
 export interface ExpenseFilters {
@@ -331,7 +303,11 @@ export const expensesRepo = {
     userId: string,
     input: CreateExpenseBody,
   ): Promise<ExpenseResult> {
-    const check = await categoryUsable(db, userId, input.categoryId);
+    const check = await categoriesRepo.checkUsable(
+      db,
+      userId,
+      input.categoryId,
+    );
     if (check !== "ok") return { ok: false, reason: check };
 
     const [row] = await db
@@ -368,7 +344,11 @@ export const expensesRepo = {
     }
 
     if (changes.categoryId !== undefined) {
-      const check = await categoryUsable(db, userId, changes.categoryId);
+      const check = await categoriesRepo.checkUsable(
+        db,
+        userId,
+        changes.categoryId,
+      );
       if (check !== "ok") return { ok: false, reason: check };
     }
 

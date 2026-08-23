@@ -19,6 +19,7 @@ import { newId } from "./lib/ids.js";
 import { authPlugin } from "./plugins/auth.js";
 import { securityPlugin } from "./plugins/security.js";
 import { authRoutes } from "./routes/auth.js";
+import { budgetRoutes } from "./routes/budgets.js";
 import { categoryRoutes } from "./routes/categories.js";
 import { expenseRoutes } from "./routes/expenses.js";
 import { healthRoutes } from "./routes/health.js";
@@ -154,6 +155,7 @@ export async function buildApp({
   await app.register(authRoutes, { db, prefix: "/api/auth" });
   await app.register(categoryRoutes, { db, prefix: "/api/categories" });
   await app.register(expenseRoutes, { db, prefix: "/api/expenses" });
+  await app.register(budgetRoutes, { db, prefix: "/api/budgets" });
 
   return app;
 }
