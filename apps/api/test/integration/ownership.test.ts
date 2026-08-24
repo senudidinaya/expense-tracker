@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { expenses } from "../../src/db/schema.js";
+import { expenses, recurringRules } from "../../src/db/schema.js";
 import { newId } from "../../src/lib/ids.js";
 import { categoriesRepo } from "../../src/repos/categories.js";
 import { expensesRepo } from "../../src/repos/expenses.js";
@@ -164,6 +164,104 @@ describe("B cannot reach A's category", () => {
       amountMinor: 500_000,
     });
     expectNotFound(r);
+  });
+});
+
+describe("B cannot reach A's recurring rule", () => {
+  // Task 13. Created in this describe's own beforeAll — not the file's — so
+  // the suites for resources that already exist keep passing while these are
+  // still red.
+  let ruleA: { id: string; description: string };
+
+  beforeAll(async () => {
+    const r = await asA.post("/api/recurring-rules", {
+      categoryId: catA.id,
+      amountMinor: 250_000,
+      description: "A's subscription",
+      frequency: "monthly",
+      startDate: "2026-01-15",
+    });
+    expect(r.statusCode).toBe(201);
+    ruleA = r.json().rule;
+  });
+
+  it("cannot PATCH it -> 404, and the row is untouched", async () => {
+    expectNotFound(
+      await asB.patch(`/api/recurring-rules/${ruleA.id}`, {
+        description: "x",
+      }),
+    );
+
+    const [row] = await db
+      .select()
+      .from(recurringRules)
+      .where(eq(recurringRules.id, ruleA.id));
+    expect(row?.description).toBe(ruleA.description);
+  });
+
+  it("cannot DELETE it -> 404, and it survives", async () => {
+    // A throwaway rule of A's, not `ruleA`: if an unscoped delete ever
+    // succeeds here, it must not also destroy the fixture the list test below
+    // asserts against — that would let the list case pass vacuously exactly
+    // when it is needed most.
+    const created = await asA.post("/api/recurring-rules", {
+      categoryId: catA.id,
+      amountMinor: 100_000,
+      description: "A's deletable decoy",
+      frequency: "weekly",
+      startDate: "2026-02-02",
+    });
+    expect(created.statusCode).toBe(201);
+    const throwaway = created.json().rule as { id: string };
+
+    expectNotFound(await asB.delete(`/api/recurring-rules/${throwaway.id}`));
+
+    const [row] = await db
+      .select()
+      .from(recurringRules)
+      .where(eq(recurringRules.id, throwaway.id));
+    expect(row).toBeDefined();
+    expect(row?.userId).toBe(userA.userId);
+  });
+
+  it("cannot use A's categoryId when creating a rule -> 404", async () => {
+    expectNotFound(
+      await asB.post("/api/recurring-rules", {
+        categoryId: catA.id,
+        amountMinor: 5_000,
+        description: "B borrowing A's category",
+        frequency: "weekly",
+        startDate: "2026-01-15",
+      }),
+    );
+  });
+
+  it("B's rule list never contains A's rules", async () => {
+    const r = await asB.get("/api/recurring-rules");
+
+    expect(r.statusCode).toBe(200);
+    const items = r.json().items as { id: string }[];
+    expect(items.map((rule) => rule.id)).not.toContain(ruleA.id);
+    // B has created none, so the only correct answer is none at all.
+    expect(items).toHaveLength(0);
+  });
+
+  it("the 404 for A's rule id is indistinguishable from a 404 for no id", async () => {
+    const patchOthers = await asB.patch(`/api/recurring-rules/${ruleA.id}`, {
+      description: "x",
+    });
+    const patchNoRow = await asB.patch(`/api/recurring-rules/${NOWHERE_ID}`, {
+      description: "x",
+    });
+    expect(patchOthers.statusCode).toBe(404);
+    expect(patchNoRow.statusCode).toBe(404);
+    expect(patchNoRow.body).toBe(patchOthers.body);
+
+    const deleteOthers = await asB.delete(`/api/recurring-rules/${ruleA.id}`);
+    const deleteNoRow = await asB.delete(`/api/recurring-rules/${NOWHERE_ID}`);
+    expect(deleteOthers.statusCode).toBe(404);
+    expect(deleteNoRow.statusCode).toBe(404);
+    expect(deleteNoRow.body).toBe(deleteOthers.body);
   });
 });
 

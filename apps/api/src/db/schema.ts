@@ -182,7 +182,9 @@ export const recurringRules = pgTable(
       .default("LKR"),
     description: text("description").notNull(),
     notes: text("notes"),
-    frequency: text("frequency").notNull(),
+    // Same `$type` reasoning as `currency`: the CHECK below fixes the value
+    // set, so the narrowing is type-level only — nothing for drizzle-kit.
+    frequency: text("frequency").$type<"weekly" | "monthly">().notNull(),
     startDate: date("start_date").notNull(),
     endDate: date("end_date"),
     nextOccurrence: date("next_occurrence").notNull(),

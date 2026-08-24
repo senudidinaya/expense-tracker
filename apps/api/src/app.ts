@@ -23,6 +23,7 @@ import { budgetRoutes } from "./routes/budgets.js";
 import { categoryRoutes } from "./routes/categories.js";
 import { expenseRoutes } from "./routes/expenses.js";
 import { healthRoutes } from "./routes/health.js";
+import { recurringRoutes } from "./routes/recurring.js";
 import { reportRoutes } from "./routes/reports.js";
 
 /** design/api.md: request body size capped at 32 KB. */
@@ -157,6 +158,7 @@ export async function buildApp({
   await app.register(categoryRoutes, { db, prefix: "/api/categories" });
   await app.register(expenseRoutes, { db, prefix: "/api/expenses" });
   await app.register(budgetRoutes, { db, prefix: "/api/budgets" });
+  await app.register(recurringRoutes, { db, prefix: "/api/recurring-rules" });
   await app.register(reportRoutes, { db, prefix: "/api/reports" });
 
   return app;
