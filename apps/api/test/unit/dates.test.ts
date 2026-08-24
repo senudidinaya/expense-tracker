@@ -1,10 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { monthRange, monthsBetween, prevPeriod } from "../../src/lib/dates.js";
+import {
+  addDays,
+  addMonths,
+  daysBetween,
+  daysInMonth,
+  monthRange,
+  monthsBetween,
+  prevPeriod,
+  todayUtc,
+} from "../../src/lib/dates.js";
 
 /**
- * Task 12, Step 1 — the date arithmetic the report routes lean on.
+ * Task 12, Step 1 — the date arithmetic the report routes lean on — extended
+ * in Task 13 with the primitives the recurring-occurrence math builds on.
  *
- * All three functions take and return `YYYY-MM-DD` / `YYYY-MM` strings and do
+ * All functions take and return `YYYY-MM-DD` / `YYYY-MM` strings and do
  * their arithmetic in UTC. There is no `Date` in any signature: a `Date` has a
  * time and a timezone, and a report that buckets by calendar month must not
  * have either — the month boundary is the one place a timezone would move a
@@ -68,6 +78,85 @@ describe("prevPeriod", () => {
       from: "2026-01-04",
       to: "2026-01-31",
     });
+  });
+});
+
+describe("addDays", () => {
+  it("steps across month and year boundaries", () => {
+    expect(addDays("2026-01-31", 1)).toBe("2026-02-01");
+    expect(addDays("2026-12-31", 1)).toBe("2027-01-01");
+    expect(addDays("2026-12-24", 7)).toBe("2026-12-31");
+  });
+
+  it("accepts negative day counts", () => {
+    expect(addDays("2026-03-01", -1)).toBe("2026-02-28");
+    expect(addDays("2026-01-01", -1)).toBe("2025-12-31");
+  });
+
+  it("zero is identity", () => {
+    expect(addDays("2026-06-15", 0)).toBe("2026-06-15");
+  });
+});
+
+describe("daysBetween", () => {
+  it("counts whole days from `from` to `to`", () => {
+    expect(daysBetween("2026-01-01", "2026-01-31")).toBe(30);
+    expect(daysBetween("2025-12-31", "2026-01-01")).toBe(1);
+  });
+
+  it("is zero for the same date and negative when `to` precedes `from`", () => {
+    expect(daysBetween("2026-05-05", "2026-05-05")).toBe(0);
+    expect(daysBetween("2026-01-31", "2026-01-01")).toBe(-30);
+  });
+
+  it("crosses a leap February without losing a day", () => {
+    expect(daysBetween("2028-02-01", "2028-03-01")).toBe(29);
+    expect(daysBetween("2026-02-01", "2026-03-01")).toBe(28);
+  });
+});
+
+describe("daysInMonth", () => {
+  it("knows February across the leap cycle", () => {
+    expect(daysInMonth("2024-02")).toBe(29);
+    expect(daysInMonth("2026-02")).toBe(28);
+    expect(daysInMonth("2028-02")).toBe(29);
+    // 2100 is divisible by 100 but not 400: not a leap year.
+    expect(daysInMonth("2100-02")).toBe(28);
+  });
+
+  it("knows 30- and 31-day months", () => {
+    expect(daysInMonth("2026-01")).toBe(31);
+    expect(daysInMonth("2026-04")).toBe(30);
+    expect(daysInMonth("2026-12")).toBe(31);
+  });
+
+  it("accepts a full `YYYY-MM-DD`, ignoring the day", () => {
+    expect(daysInMonth("2026-02-15")).toBe(28);
+  });
+});
+
+describe("addMonths", () => {
+  it("steps within and across a year", () => {
+    expect(addMonths("2026-01", 1)).toBe("2026-02");
+    expect(addMonths("2026-12", 1)).toBe("2027-01");
+    expect(addMonths("2026-11", 14)).toBe("2028-01");
+  });
+
+  it("accepts negative and zero counts", () => {
+    expect(addMonths("2026-01", -1)).toBe("2025-12");
+    expect(addMonths("2026-06", 0)).toBe("2026-06");
+  });
+});
+
+describe("todayUtc", () => {
+  it("is today's UTC date as YYYY-MM-DD", () => {
+    // Sample the clock on both sides so the assertion cannot flake if the
+    // test straddles UTC midnight.
+    const before = new Date().toISOString().slice(0, 10);
+    const today = todayUtc();
+    const after = new Date().toISOString().slice(0, 10);
+    expect(today).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect([before, after]).toContain(today);
   });
 });
 

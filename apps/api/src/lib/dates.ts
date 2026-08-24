@@ -1,11 +1,15 @@
 /**
- * Calendar arithmetic on `YYYY-MM-DD` and `YYYY-MM` strings, for the reports.
+ * Calendar arithmetic on `YYYY-MM-DD` and `YYYY-MM` strings — the report
+ * ranges and the recurring-occurrence primitives share these.
  *
  * Everything here goes through `Date.UTC` and the UTC getters and nothing else.
  * A `Date` built any other way carries the server's timezone, and a month
  * boundary is precisely where a timezone moves a date by a day: the 31st at
  * 23:00 in one zone is the 1st in another. The wire and the DATE column have
  * no time, so neither does this module — strings in, strings out.
+ *
+ * `todayUtc` is the single impure function here: it reads the clock. Every
+ * other export is string-in/string-out.
  */
 
 export interface DateRange {
@@ -41,8 +45,37 @@ const formatDate = (dt: Date): string =>
 const formatMonth = (dt: Date): string =>
   `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}`;
 
-const addDays = (isoDate: string, days: number): string =>
+/** `isoDate` plus `days`, as `YYYY-MM-DD`. Negative steps backward. */
+export const addDays = (isoDate: string, days: number): string =>
   formatDate(new Date(toUtc(parse(isoDate)).getTime() + days * MS_PER_DAY));
+
+/** Whole days from `from` to `to`; negative when `to` precedes `from`. */
+export function daysBetween(from: string, to: string): number {
+  return Math.round(
+    (toUtc(parse(to)).getTime() - toUtc(parse(from)).getTime()) / MS_PER_DAY,
+  );
+}
+
+/**
+ * Days in the month of a `YYYY-MM` or `YYYY-MM-DD`.
+ *
+ * `Date.UTC(y, m, 0)` is "day zero of the following month", which the runtime
+ * normalizes to the last day of this one — February and its leap years
+ * included, with no table of month lengths to keep correct.
+ */
+export function daysInMonth(month: string): number {
+  const { y, m } = parse(month);
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+/** `YYYY-MM` plus `k` months, as `YYYY-MM`. Negative steps backward. */
+export function addMonths(month: string, k: number): string {
+  const { y, m } = parse(month);
+  return formatMonth(toUtc({ y, m: m + k, d: 1 }));
+}
+
+/** Today in UTC as `YYYY-MM-DD`. The generator's calendar; see the brief. */
+export const todayUtc = (): string => new Date().toISOString().slice(0, 10);
 
 /**
  * The first and last day of a `YYYY-MM` month.
@@ -70,9 +103,7 @@ export function monthRange(month: string): DateRange {
  * means the same thing for all of them.
  */
 export function prevPeriod(from: string, to: string): DateRange {
-  const lengthDays = Math.round(
-    (toUtc(parse(to)).getTime() - toUtc(parse(from)).getTime()) / MS_PER_DAY,
-  );
+  const lengthDays = daysBetween(from, to);
   const prevTo = addDays(from, -1);
   return { from: addDays(prevTo, -lengthDays), to: prevTo };
 }
