@@ -21,15 +21,22 @@ export const DEFAULT_CATEGORY_NAMES = [
   "Other",
 ] as const;
 
+/**
+ * Returns the rows it wrote, because demo provisioning needs the ids: the demo
+ * dataset names its categories (`"Rent"`, `"Food"`), and something has to map
+ * those onto the ids this call just minted. Returning them beats a follow-up
+ * SELECT in the same transaction. Signup ignores the value.
+ */
 export async function insertDefaultCategories(
   tx: DbOrTx,
   userId: string,
-): Promise<void> {
-  await tx
+): Promise<Array<{ id: string; name: string }>> {
+  return tx
     .insert(categories)
     .values(
       DEFAULT_CATEGORY_NAMES.map((name) => ({ id: newId(), userId, name })),
-    );
+    )
+    .returning({ id: categories.id, name: categories.name });
 }
 
 /** Everything a caller outside this file may know about a category. */
