@@ -1,6 +1,7 @@
 import { PostgreSqlContainer } from "@testcontainers/postgresql";
 import type { InjectOptions, LightMyRequestResponse } from "fastify";
 import postgres from "postgres";
+import { expect } from "vitest";
 import { randomBytes } from "node:crypto";
 import { buildApp, type App } from "../src/app.js";
 import { createDb } from "../src/db/client.js";
@@ -201,3 +202,27 @@ export function asUser(app: App, user: TestUser) {
     delete: (url: string) => send("DELETE", url),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Date-order assertions
+// ---------------------------------------------------------------------------
+
+/**
+ * `YYYY-MM-DD` sorts lexicographically, which is what makes comparing dates as
+ * strings sound — but vitest's numeric matchers reject them outright
+ * ("actual value must be number or bigint, received string"), so
+ * `expect(date).toBeGreaterThan(today)` is a TypeError and not a comparison.
+ * A bare `expect(a <= b).toBe(true)` compares correctly but reports only
+ * "expected false to be true"; these two put both dates in the message.
+ */
+export const expectOnOrBefore = (earlier: string, later: string): void => {
+  expect(earlier <= later ? "ordered" : `${earlier} is after ${later}`).toBe(
+    "ordered",
+  );
+};
+
+export const expectStrictlyBefore = (earlier: string, later: string): void => {
+  expect(
+    earlier < later ? "ordered" : `${earlier} is not before ${later}`,
+  ).toBe("ordered");
+};
