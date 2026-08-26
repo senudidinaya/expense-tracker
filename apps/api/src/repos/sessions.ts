@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import type { Db } from "../db/client.js";
+import type { Db, DbOrTx } from "../db/client.js";
 import { sessions } from "../db/schema.js";
 import { createSessionToken } from "../lib/crypto.js";
 import { newId } from "../lib/ids.js";
@@ -38,8 +38,13 @@ export const sessionsRepo = {
    * Mints a session and returns the raw token — the only moment it exists
    * server-side. Only its sha256 is written, so the row cannot be turned back
    * into a usable cookie.
+   *
+   * `DbOrTx` rather than `Db`, for the same reason `insertDefaultCategories`
+   * takes one: demo provisioning issues the session inside the transaction
+   * that creates the user and its data, so a demo cannot exist in a state
+   * where the visitor holds a cookie for a half-seeded account.
    */
-  async create(db: Db, userId: string, now = new Date()): Promise<string> {
+  async create(db: DbOrTx, userId: string, now = new Date()): Promise<string> {
     const { token, tokenHash } = createSessionToken();
     await db.insert(sessions).values({
       id: newId(),

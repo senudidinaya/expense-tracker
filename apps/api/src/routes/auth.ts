@@ -9,6 +9,7 @@ import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
 import { dummyPasswordHash, hashSessionToken } from "../lib/crypto.js";
+import { todayUtc } from "../lib/dates.js";
 import { isCommonPassword } from "../lib/password-blocklist.js";
 import { SESSION_COOKIE, currentUserId } from "../plugins/auth.js";
 import { AUTH_RATE_LIMITS } from "../plugins/security.js";
@@ -140,6 +141,61 @@ export const authRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (
       const token = await sessionsRepo.create(db, user.id);
       reply.setSessionCookie(token);
       return reply.send({ user: toUserDto(user) });
+    },
+  );
+
+  app.post(
+    "/demo",
+    {
+      // The most expensive unauthenticated route in the app: an argon2 hash
+      // plus a few hundred seeded inserts per call. 5/min/IP is design/api.md's
+      // figure and the reason the capacity cap is a ceiling rather than a race
+      // anyone can win on purpose.
+      config: { rateLimit: AUTH_RATE_LIMITS.demo },
+      schema: {
+        response: {
+          201: userResponse,
+          503: errorResponse,
+        },
+      },
+    },
+    async (req, reply) => {
+      // The one place the clock is read for a demo. `demoDataset` takes `today`
+      // as a parameter — nothing below this line reads it — and the value is
+      // UTC, matching `todayUtc()` everywhere else in the codebase including
+      // the recurring generator the seeded rules are handed to. Asia/Colombo
+      // would be a second definition of "today" in a system built on there
+      // being one, and the cron fires at 20:30 UTC — 02:00 Colombo the next
+      // day — so the two would disagree for 5.5 hours daily about which day a
+      // rule's cursor belongs to. The cost is that for those hours a Colombo
+      // visitor's newest demo expense reads as yesterday's; cosmetic, in a
+      // demo, and changed for every caller at once if `lib/dates.ts` ever
+      // adopts a local calendar.
+      const provisioned = await usersRepo.provisionDemo(db, {
+        today: todayUtc(),
+      });
+
+      if (!provisioned.ok) {
+        return reply
+          .code(503)
+          .send(
+            errorEnvelope(
+              "demo_unavailable",
+              "The demo is at capacity right now — please try again in a little while",
+            ),
+          );
+      }
+
+      // Rotation, as on login: whatever session the visitor arrived holding is
+      // destroyed. After provisioning rather than before, so a request refused
+      // for capacity does not sign the visitor out of the account they had.
+      const presented = req.cookies[SESSION_COOKIE];
+      if (presented !== undefined) {
+        await sessionsRepo.delete(db, hashSessionToken(presented));
+      }
+
+      reply.setSessionCookie(provisioned.token);
+      return reply.code(201).send({ user: toUserDto(provisioned.user) });
     },
   );
 
