@@ -120,6 +120,33 @@ CSRF story (SameSite=Lax + Origin check, no token dance) and the self-only CSP w
 - **Recurring next-occurrence is always computed from the anchor day in `start_date`**,
   never by incrementing the previously clamped date — otherwise Jan 31 → Feb 28 → Mar 28
   drifts forever. The required test case is Jan 31 → Feb 28 → Mar 31.
+- **The recurring generator has two independent idempotency guards, and both are
+  required.** `recurring_rules.next_occurrence` is a _cursor_: it advances past the
+  generated dates so a later run in the same day finds nothing due. That is an
+  application-level belief, read at the start of a run and written at the end, so it is
+  stale for the whole span in between. `expenses_rule_date_uq` (partial unique on
+  `(recurring_rule_id, date)`) is the _constraint_: Postgres checks it against committed
+  state at write time, so it holds even when two runs overlap — a retried cron, a
+  `workflow_dispatch` firing alongside the schedule, a job restarted mid-flight. Because
+  the generator's `ON CONFLICT` names that index as its target, the index is also a hard
+  dependency of the write path: dropping it fails every insert at plan time (42P10, "no
+  unique or exclusion constraint matching the ON CONFLICT specification") rather than
+  degrading into silent duplicates. `ON CONFLICT DO NOTHING` is not itself the guarantee —
+  it only decides whether an expected collision is a no-op or a loud failure. Without it
+  the index still blocks the duplicate; the rule just fails its run instead.
+  The cursor prevents repetition across runs; the index prevents duplication within a race.
+  Testing note: "run the generator twice, second run inserts nothing" only exercises the
+  cursor — the second run's SELECT returns no due rules, so the insert path never executes
+  and the test stays green with the unique index dropped. The constraint needs its own
+  test that resets `next_occurrence` (or pre-inserts the occurrence row) before the second
+  run. See `apps/api/test/integration/generator.test.ts`.
+- **A recurring rule whose category is archived is skipped, and its
+  `next_occurrence` still advances.** Generating into an archived category would
+  contradict the 400 the API returns on manual create — a background job must not be
+  able to write a row a user cannot. Advancing the cursor makes the skip permanent and
+  visible rather than a silent backlog: leaving `next_occurrence` in place would dump
+  every missed occurrence at once if the category is later unarchived. The generator
+  logs each skipped rule.
 - **Dates are the Postgres `DATE` type**, not timestamp/timestamptz. Monthly reports bucket
   by calendar date; a timestamp column reintroduces timezone drift at month boundaries.
   Dates cross the wire as `YYYY-MM-DD`, months as `YYYY-MM`.
