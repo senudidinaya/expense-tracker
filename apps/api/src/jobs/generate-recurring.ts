@@ -49,13 +49,15 @@
  */
 
 import { and, asc, eq, lte, sql } from "drizzle-orm";
-import pino from "pino";
+import pino, { type Logger } from "pino";
 import type { Db } from "../db/client.js";
 import { categories, expenses, recurringRules } from "../db/schema.js";
 import { nextOccurrence, occurrencesThrough } from "../domain/recurring.js";
 import { newId } from "../lib/ids.js";
+import { errorMessage } from "../lib/pg-errors.js";
 
-const log = pino({ name: "generate-recurring" });
+/** Used when nobody passes one in — a direct `pnpm exec` of this module. */
+const defaultLog = pino({ name: "generate-recurring" });
 
 /**
  * A single run's ceiling per rule. A rule whose cursor is years stale — a
@@ -123,18 +125,6 @@ interface DueRule {
 }
 
 /**
- * Drizzle wraps a driver error in a `DrizzleQueryError` whose own message is
- * the entire SQL text plus every bound parameter — descriptions, amounts, ids.
- * `failures` is logged by the nightly job, so the wrapper's message would put
- * user data and query internals into CI output on every bad rule. The `cause`
- * is the Postgres error itself: the actionable line, and the safe one.
- */
-const message = (err: unknown): string => {
-  if (!(err instanceof Error)) return String(err);
-  return err.cause instanceof Error ? err.cause.message : err.message;
-};
-
-/**
  * Generates every occurrence due through `today`, for every rule in the
  * database. Runs from the nightly cron against the database directly; the
  * web service is not involved.
@@ -142,6 +132,12 @@ const message = (err: unknown): string => {
 export async function generateRecurring(
   db: Db,
   today: string,
+  /**
+   * The nightly job (Task 16) passes a child logger carrying its run id, so
+   * the generator's per-rule lines correlate with the two steps that ran
+   * before it. Defaulted rather than required: this stays runnable on its own.
+   */
+  log: Logger = defaultLog,
 ): Promise<GenerateRecurringResult> {
   // Read outside any transaction: this is only the work list. Every field it
   // carries is re-read under the lock before being acted on.
@@ -162,7 +158,9 @@ export async function generateRecurring(
     try {
       // One transaction per rule, not one for the run: a rule that throws must
       // roll back its own occurrences and nothing else.
-      const outcome = await db.transaction((tx) => processRule(tx, id, today));
+      const outcome = await db.transaction((tx) =>
+        processRule(tx, id, today, log),
+      );
 
       // Held by a concurrent run — not this run's to count or report.
       if (outcome.status === "locked") continue;
@@ -174,8 +172,11 @@ export async function generateRecurring(
       // One bad rule must not abort the run. The rule keeps its cursor (the
       // transaction rolled back), so the next run retries it.
       result.rulesProcessed += 1;
-      result.failures.push(`${id}: ${message(err)}`);
-      log.error({ ruleId: id, err: message(err) }, "recurring rule failed");
+      result.failures.push(`${id}: ${errorMessage(err)}`);
+      log.error(
+        { ruleId: id, err: errorMessage(err) },
+        "recurring rule failed",
+      );
     }
   }
 
@@ -194,6 +195,7 @@ async function processRule(
   tx: Tx,
   ruleId: string,
   today: string,
+  log: Logger,
 ): Promise<RuleOutcome> {
   // Re-read under a row lock. SKIP LOCKED rather than a plain FOR UPDATE:
   // a rule another run already holds is being generated right now, so waiting
