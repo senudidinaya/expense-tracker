@@ -1,0 +1,33 @@
+name: nightly
+on:
+  # 20:30 UTC = 02:00 Asia/Colombo. GitHub cron is UTC-only, and the whole
+  # codebase reasons in UTC (lib/dates.ts) — the local time is what the hour
+  # was chosen for, not what the job runs on.
+  schedule:
+    - cron: "30 20 * * *"
+  # The job is idempotent by design (see jobs/generate-recurring.ts), so a
+  # manual run is always safe — which is what makes it the recovery path after
+  # a failed night.
+  workflow_dispatch:
+# A dispatch fired next to the schedule would be two runs against one database.
+# The generator survives that (its unique index is what makes overlap safe),
+# but there is nothing to gain from it, so they queue instead.
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      # Straight at the database, not through the API: the web service is on a
+      # free tier and may be asleep, which is irrelevant to a job that only
+      # needs Postgres. Exits non-zero if any of the three steps failed, so a
+      # bad night shows up as a failed run rather than only in the log.
+      - run: pnpm --filter @expense/api exec tsx src/jobs/nightly.ts
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
