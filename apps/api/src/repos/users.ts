@@ -1,7 +1,7 @@
 import { eq, sql } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
 import type { Db } from "../db/client.js";
-import { budgets, expenses, recurringRules, users } from "../db/schema.js";
+import { users } from "../db/schema.js";
 import {
   dummyPasswordHash,
   hashPassword,
@@ -9,7 +9,7 @@ import {
 } from "../lib/crypto.js";
 import { newId } from "../lib/ids.js";
 import { isUniqueViolation } from "../lib/pg-errors.js";
-import { demoDataset } from "../seed/demo-data.js";
+import { insertDemoDataset } from "../seed/insert-demo-dataset.js";
 import { insertDefaultCategories } from "./categories.js";
 import { sessionsRepo } from "./sessions.js";
 
@@ -177,60 +177,15 @@ export const usersRepo = {
       if (!user) throw new Error("demo user insert returned no row");
 
       const seeded = await insertDefaultCategories(tx, user.id);
-      const idByName = new Map(seeded.map((c) => [c.name, c.id]));
-      const categoryId = (name: string): string => {
-        const found = idByName.get(name);
-        // Unreachable while the dataset draws from the default seed set, which
-        // its own unit test enforces. Loud here rather than a null constraint
-        // violation three statements later.
-        if (found === undefined) {
-          throw new Error(`demo dataset names an unknown category: ${name}`);
-        }
-        return found;
-      };
 
       // Seeded from the user's id: one visitor always gets one dataset, two
       // visitors on the same day get different amounts. See seed/demo-data.ts.
-      const dataset = demoDataset(today, user.id);
-
-      await tx.insert(recurringRules).values(
-        dataset.recurringRules.map((rule) => ({
-          id: newId(),
-          userId: user.id,
-          categoryId: categoryId(rule.category),
-          amountMinor: rule.amountMinor,
-          description: rule.description,
-          notes: null,
-          frequency: rule.frequency,
-          startDate: rule.startDate,
-          endDate: rule.endDate,
-          nextOccurrence: rule.nextOccurrence,
-        })),
-      );
-
-      // No `recurring_rule_id` on these rows, deliberately: they are the
-      // visitor's history, not this job's output. See seed/demo-data.ts.
-      await tx.insert(expenses).values(
-        dataset.expenses.map((expense) => ({
-          id: newId(),
-          userId: user.id,
-          categoryId: categoryId(expense.category),
-          amountMinor: expense.amountMinor,
-          date: expense.date,
-          description: expense.description,
-          notes: expense.notes,
-        })),
-      );
-
-      await tx.insert(budgets).values(
-        dataset.budgets.map((budget) => ({
-          id: newId(),
-          userId: user.id,
-          categoryId: categoryId(budget.category),
-          monthStart: budget.monthStart,
-          amountMinor: budget.amountMinor,
-        })),
-      );
+      await insertDemoDataset(tx, {
+        userId: user.id,
+        today,
+        seed: user.id,
+        categoryIds: new Map(seeded.map((c) => [c.name, c.id])),
+      });
 
       const token = await sessionsRepo.create(tx, user.id);
       return { ok: true, user, token };
