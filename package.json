@@ -11,7 +11,8 @@
     "typecheck": "pnpm -r --parallel typecheck",
     "test": "pnpm -r test",
     "build": "pnpm -r build",
-    "dev": "pnpm --parallel --filter @expense/api --filter @expense/web dev"
+    "dev": "pnpm --parallel --filter @expense/api --filter @expense/web dev",
+    "seed": "pnpm --filter @expense/api exec tsx src/jobs/seed-local.ts"
   },
   "devDependencies": {
     "eslint": "^10.8.0",
