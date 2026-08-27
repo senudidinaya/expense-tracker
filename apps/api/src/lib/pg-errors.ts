@@ -34,3 +34,17 @@ export function isUniqueViolation(err: unknown, constraint: string): boolean {
   }
   return false;
 }
+
+/**
+ * The message worth logging for `err`, without the query around it.
+ *
+ * Drizzle wraps a driver error in a `DrizzleQueryError` whose own message is
+ * the entire SQL text plus every bound parameter — descriptions, amounts, ids.
+ * Job failure lists end up in CI output, so the wrapper's message would put
+ * user data and query internals there on every bad row. The `cause` is the
+ * Postgres error itself: the actionable line, and the safe one.
+ */
+export function errorMessage(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  return err.cause instanceof Error ? err.cause.message : err.message;
+}
