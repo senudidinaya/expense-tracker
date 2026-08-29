@@ -44,10 +44,31 @@ const base = cn(
   "w-fit",
 );
 
+/**
+ * What a FILLED button becomes when it is disabled.
+ *
+ * Opacity alone is not enough here. Halving a coloured fill leaves a paler
+ * version of that colour, not a neutral: the accent green lands on a sage that
+ * still carries the accent's hue, so a disabled primary reads as a second
+ * brand colour next to the live one instead of as an unavailable control. The
+ * fill has to leave the hue family, not just lose contrast — so it is swapped
+ * for a neutral grey and the label with it (dark's accent-fg is the base
+ * green, which would be illegible on grey). The opacity and cursor treatment
+ * in `base` still applies on top.
+ *
+ * Outline variants (secondary, ghost, danger) need none of this: their fill is
+ * already transparent, so fading them is genuinely a fade to nothing.
+ */
+const filledDisabled = cn(
+  "disabled:border-transparent",
+  "disabled:bg-control-disabled disabled:text-control-disabled-fg",
+);
+
 const variants: Record<ButtonVariant, string> = {
   primary: cn(
     "border-transparent bg-accent text-accent-fg",
     "enabled:hover:bg-accent-hover",
+    filledDisabled,
   ),
   secondary: cn(
     "border-border-strong bg-surface text-text",
@@ -68,6 +89,9 @@ const variants: Record<ButtonVariant, string> = {
   "danger-confirm": cn(
     "border-transparent bg-danger-solid text-danger-fg",
     "enabled:hover:bg-danger-solid-hover",
+    // The other filled variant, so the same rule applies: a disabled confirm
+    // must not be a muted pink.
+    filledDisabled,
   ),
 };
 

@@ -96,6 +96,15 @@
   --success: #157479;
   --success-subtle: #eaf5f6;
 
+  /* Filled buttons drop to this when disabled. It is a NEUTRAL, not a faded
+     accent: halving the accent's opacity leaves #84a69a, a sage that is still
+     13.3% off the grey axis and still sitting on the accent's own hue (159),
+     so it reads as a second brand colour competing with the live button
+     rather than as an unavailable control. This grey is hue 216 — the same
+     family as every other neutral here — and composites to 3.9% chroma. */
+  --control-disabled: #9ca3af;
+  --control-disabled-fg: #ffffff;
+
   --ring: color-mix(in srgb, var(--accent) 45%, transparent);
   --scrim: rgb(15 23 42 / 40%);
 
@@ -145,6 +154,13 @@
   --success: #27b2b9;
   --success-subtle: #153132;
 
+  /* Same job on the dark canvas, where the faded accent is worse: it lands at
+     #3a6e5b, 20.4% off the grey axis and unmistakably still green. The
+     foreground has to be overridden too — dark's accent-fg is the base green,
+     which would be unreadable on grey. */
+  --control-disabled: #565b63;
+  --control-disabled-fg: #e6e7e9;
+
   --ring: color-mix(in srgb, var(--accent) 55%, transparent);
   --scrim: rgb(0 0 0 / 60%);
 
@@ -193,6 +209,9 @@
 
   --color-success: var(--success);
   --color-success-subtle: var(--success-subtle);
+
+  --color-control-disabled: var(--control-disabled);
+  --color-control-disabled-fg: var(--control-disabled-fg);
 
   --color-ring: var(--ring);
   --color-scrim: var(--scrim);

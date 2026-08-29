@@ -146,6 +146,13 @@ export function KitchenSink() {
               <Button variant="danger" disabled>
                 Delete
               </Button>
+              <Button variant="danger-confirm" disabled>
+                Yes, delete it
+              </Button>
+              <span className="text-xs text-muted">
+                filled variants go neutral grey, not a faded tint of their own
+                colour
+              </span>
             </Row>
             <Row label="Loading">
               <Button variant="primary" loading>
