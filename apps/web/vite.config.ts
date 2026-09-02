@@ -26,5 +26,10 @@ export default defineConfig({
     // component test that follows need a DOM. `apps/web` has no other
     // environment, so this is set once here rather than per file.
     environment: "jsdom",
+
+    // Testing Library's matchers and its between-test cleanup. Both are
+    // process-wide concerns, so they are registered once here rather than
+    // imported by every component test.
+    setupFiles: ["./src/test/setup.ts"],
   },
 });
