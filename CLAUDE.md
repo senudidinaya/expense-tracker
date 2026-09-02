@@ -30,7 +30,15 @@ pnpm lint                       # eslint . && prettier --check .   (root, all wo
 pnpm typecheck                  # tsc per workspace, parallel
 pnpm test                       # recursive
 pnpm build                      # recursive
-pnpm dev                        # api (tsx watch) + web (vite) in parallel
+
+# api (tsx watch, :3000) + web (vite, :5173) in parallel. The env prefix is
+# required: `src/env.ts` reads `process.env` and nothing loads `.env` for
+# `tsx watch`, so a bare `pnpm dev` starts Vite but crashes the API on
+# "Invalid environment" and every /api call proxies to a 502.
+# POSIX:
+set -a && . ./.env && set +a && pnpm dev
+# PowerShell:
+Get-Content .env | Where-Object { $_ -match '^\s*[^#\s]' } | ForEach-Object { $n, $v = $_ -split '=', 2; Set-Item "env:$n" $v }; pnpm dev
 ```
 
 Per-workspace and single tests:
