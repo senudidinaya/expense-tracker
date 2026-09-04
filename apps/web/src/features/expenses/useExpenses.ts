@@ -4,9 +4,8 @@ import {
   useQueryClient,
   type InfiniteData,
 } from "@tanstack/react-query";
-import { z } from "zod";
 import {
-  expenseDto,
+  expenseResponse,
   listExpensesResponse,
   type CreateExpenseBody,
   type Expense,
@@ -15,8 +14,6 @@ import {
 } from "@expense/shared";
 import { apiFetch, noContent } from "../../api/client";
 import { filtersToSearchParams, type ExpenseFilters } from "./filters";
-
-const expenseResponse = z.object({ expense: expenseDto });
 
 /** The query key every expenses query and mutation targets, given the filters shown on screen. */
 export function expensesQueryKey(filters: ExpenseFilters) {
@@ -76,8 +73,35 @@ function replaceInPages(
   };
 }
 
-/** Placeholder id for a row that only exists in the optimistic cache so far. */
+/**
+ * Placeholder id for a row that only exists in the optimistic cache so far.
+ *
+ * The prefix is load-bearing rather than cosmetic. An optimistic row has no
+ * server-side identity yet, so every route that takes an expense id —
+ * `PATCH /expenses/:id`, `DELETE /expenses/:id` — will reject it: `idParams`
+ * is `uuid`, so "optimistic-0" is a 400 before any handler runs. That makes
+ * the prefix the one available signal that a row's actions cannot work yet,
+ * and `isOptimisticExpense` the single reader of it. Minting and detection
+ * live side by side on purpose: they are one convention, and splitting them
+ * is how the two drift apart.
+ */
+const OPTIMISTIC_ID_PREFIX = "optimistic-";
 let optimisticSeq = 0;
+
+function nextOptimisticId(): string {
+  return `${OPTIMISTIC_ID_PREFIX}${String(optimisticSeq++)}`;
+}
+
+/**
+ * True while this row exists only in the cache, awaiting the POST's response.
+ *
+ * Callers rendering row actions must disable them for such a row: an Edit that
+ * opens the form and then PATCHes "optimistic-0" is a guaranteed 400 shown to
+ * a user who did nothing wrong, and a Delete is the same.
+ */
+export function isOptimisticExpense(expense: Expense): boolean {
+  return expense.id.startsWith(OPTIMISTIC_ID_PREFIX);
+}
 
 /**
  * Optimistic create: the new row lands in the first page of the cache before
@@ -103,7 +127,7 @@ export function useCreateExpense(filters: ExpenseFilters) {
 
       const now = new Date().toISOString();
       const optimistic: Expense = {
-        id: `optimistic-${String(optimisticSeq++)}`,
+        id: nextOptimisticId(),
         categoryId: body.categoryId,
         recurringRuleId: null,
         amountMinor: body.amountMinor,
@@ -171,6 +195,15 @@ export function useUpdateExpense(filters: ExpenseFilters) {
  * removed; a failed delete means a row the user believed was gone is back —
  * and if they have already moved on, they never learn it failed. So the row
  * stays on screen, unmutated, until the server confirms it is gone.
+ *
+ * That is only half the contract, and the only half this hook can keep.
+ * Leaving the row in place stops the UI lying about *state*, but it says
+ * nothing about the *action*: a delete that failed and a delete that was
+ * never attempted look identical on screen, so an unread `isError` reads as
+ * success — which is exactly how Task 20 BLOCKER 3 shipped, under this
+ * docstring's own reasoning. **Every caller must render `isError`/`error`.**
+ * `ExpensesPage` renders it as a banner naming the expense, kept alive only
+ * while that row is still loaded (see `ExpensesPage.test.tsx`).
  */
 export function useDeleteExpense() {
   const queryClient = useQueryClient();
