@@ -79,6 +79,19 @@ export const expenseDto = z.object({
   updatedAt: timestamp,
 });
 
+/**
+ * Output. The envelope every single-expense route answers with — `POST` and
+ * `PATCH` today.
+ *
+ * It lives here rather than in each app because it *is* the contract, and two
+ * hand-written copies of the same wrapper is precisely the drift this package
+ * exists to prevent: the API declared its 201/200 shape and the web app
+ * declared what it parses, and nothing but attention kept the two the same.
+ * Wrapping in an object rather than returning the expense bare is what leaves
+ * room to add a sibling field later without it being a breaking change.
+ */
+export const expenseResponse = z.object({ expense: expenseDto });
+
 /** Totals are computed in SQL under the same filters, and only on the first page. */
 export const listExpensesResponse = z.object({
   items: z.array(expenseDto),
@@ -87,6 +100,7 @@ export const listExpensesResponse = z.object({
   totalAmountMinor: z.int().nonnegative().optional(),
 });
 
+export type ExpenseResponse = z.infer<typeof expenseResponse>;
 export type CreateExpenseBody = z.infer<typeof createExpenseBody>;
 export type PatchExpenseBody = z.infer<typeof patchExpenseBody>;
 export type ExpenseFiltersQuery = z.infer<typeof expenseFiltersQuery>;
