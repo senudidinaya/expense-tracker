@@ -2,6 +2,7 @@ import type { Category, Expense } from "@expense/shared";
 import { Button } from "../../components/ui/Button";
 import { MoneyText } from "../../components/ui/MoneyText";
 import { SkeletonRows } from "../../components/ui/Skeleton";
+import { isOptimisticExpense } from "./useExpenses";
 import {
   TBody,
   THead,
@@ -61,45 +62,56 @@ export function ExpenseTable({
             No expenses match these filters.
           </TFullRow>
         ) : (
-          items.map((item) => (
-            <TR key={item.id}>
-              <TD>{item.date}</TD>
-              <TD>{categoriesById.get(item.categoryId)?.name ?? "—"}</TD>
-              <TD>
-                <span className="inline-flex items-center gap-1.5">
-                  {item.description}
-                  {item.notes ? (
-                    <span
-                      aria-label="Has notes"
-                      title={item.notes}
-                      className="size-1.5 shrink-0 rounded-full bg-accent"
-                    />
-                  ) : null}
-                </span>
-              </TD>
-              <TD numeric>
-                <MoneyText amountMinor={item.amountMinor} />
-              </TD>
-              <TD>
-                <div className="flex justify-end gap-1">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => onEdit(item)}
-                  >
-                    Edit
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => onDelete(item)}
-                  >
-                    Delete
-                  </Button>
-                </div>
-              </TD>
-            </TR>
-          ))
+          items.map((item) => {
+            // A row the server has not acknowledged yet has no id either
+            // route will accept, so its actions can only produce a 400 (see
+            // `isOptimisticExpense`). Disabled rather than hidden: the row is
+            // about to become real, and controls that appear a beat later
+            // move everything under the pointer.
+            const unsaved = isOptimisticExpense(item);
+
+            return (
+              <TR key={item.id} aria-busy={unsaved || undefined}>
+                <TD>{item.date}</TD>
+                <TD>{categoriesById.get(item.categoryId)?.name ?? "—"}</TD>
+                <TD>
+                  <span className="inline-flex items-center gap-1.5">
+                    {item.description}
+                    {item.notes ? (
+                      <span
+                        aria-label="Has notes"
+                        title={item.notes}
+                        className="size-1.5 shrink-0 rounded-full bg-accent"
+                      />
+                    ) : null}
+                  </span>
+                </TD>
+                <TD numeric>
+                  <MoneyText amountMinor={item.amountMinor} />
+                </TD>
+                <TD>
+                  <div className="flex justify-end gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={unsaved}
+                      onClick={() => onEdit(item)}
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={unsaved}
+                      onClick={() => onDelete(item)}
+                    >
+                      Delete
+                    </Button>
+                  </div>
+                </TD>
+              </TR>
+            );
+          })
         )}
       </TBody>
     </Table>
