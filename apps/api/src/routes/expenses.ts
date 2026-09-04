@@ -2,7 +2,7 @@ import {
   createExpenseBody,
   errorEnvelope,
   errorResponse,
-  expenseDto,
+  expenseResponse,
   exportExpensesQuery,
   listExpensesQuery,
   listExpensesResponse,
@@ -28,8 +28,6 @@ import {
   type ExpenseRecord,
   type ExportRow,
 } from "../repos/expenses.js";
-
-const expenseResponse = z.object({ expense: expenseDto });
 
 const idParams = z.object({ id: uuid });
 
