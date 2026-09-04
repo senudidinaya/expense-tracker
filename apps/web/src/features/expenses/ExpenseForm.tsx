@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
+import { z } from "zod";
 import {
   createExpenseBody,
   todayIsoDate,
@@ -13,6 +14,7 @@ import { Button } from "../../components/ui/Button";
 import { Input } from "../../components/ui/Input";
 import { Select } from "../../components/ui/Select";
 import { SlideOver } from "../../components/ui/SlideOver";
+import { formatMinorForInput, parseRupeesToMinor } from "../../lib/money";
 
 export interface ExpenseFormProps {
   open: boolean;
@@ -24,9 +26,53 @@ export interface ExpenseFormProps {
   onSubmit: (body: CreateExpenseBody) => Promise<void>;
 }
 
-function defaultsFor(expense: Expense | undefined): CreateExpenseBody {
+/**
+ * The RHF form's own shape — not `CreateExpenseBody`. `amountRupees` is a
+ * string because that's what a text field holds; converting it to the
+ * integer minor units the API wants happens once, explicitly, in the submit
+ * handler, never by `reset()` writing minor units into a field that
+ * elsewhere reads its own display value as rupees (Task 20 BLOCKER 1).
+ *
+ * The non-amount fields reuse `createExpenseBody`'s own field schemas so the
+ * validation rules (max lengths, the 1-year-ahead date cap) live in exactly
+ * one place. `amountRupees` is the one field that cannot: it validates in two
+ * steps, because rupee *syntax* and "an expense costs more than nothing" are
+ * different rules owned by different layers. `parseRupeesToMinor` answers the
+ * first; `amountMinor.positive()` in @expense/shared owns the second, and this
+ * is where that rule reaches the user as a field error rather than as a thrown
+ * parse failure.
+ */
+const expenseFormSchema = z.object({
+  amountRupees: z.string().superRefine((value, ctx) => {
+    let amountMinor: number;
+    try {
+      amountMinor = parseRupeesToMinor(value);
+    } catch (caught) {
+      ctx.addIssue({
+        code: "custom",
+        message: caught instanceof Error ? caught.message : "Invalid amount",
+      });
+      return;
+    }
+
+    if (amountMinor <= 0) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Amount must be more than Rs 0.00",
+      });
+    }
+  }),
+  categoryId: createExpenseBody.shape.categoryId,
+  date: createExpenseBody.shape.date,
+  description: createExpenseBody.shape.description,
+  notes: createExpenseBody.shape.notes,
+});
+
+type ExpenseFormValues = z.infer<typeof expenseFormSchema>;
+
+function defaultsFor(expense: Expense | undefined): ExpenseFormValues {
   return {
-    amountMinor: expense?.amountMinor ?? 0,
+    amountRupees: formatMinorForInput(expense?.amountMinor ?? 0),
     categoryId: expense?.categoryId ?? "",
     date: expense?.date ?? todayIsoDate(),
     description: expense?.description ?? "",
@@ -35,16 +81,11 @@ function defaultsFor(expense: Expense | undefined): CreateExpenseBody {
 }
 
 /**
- * Add/edit slide-over, resolved against the shared `createExpenseBody` — the
- * same schema the API validates the request body with. Edit sends a full
- * object too: `patchExpenseBody` is `createExpenseBody.partial()`, so a
- * complete body already satisfies it.
- *
- * The amount field is the one place the form's display and the schema's
- * value differ: people type rupees, the schema wants integer minor units.
- * `setValueAs` does that conversion at the point of registration, so the
- * resolver is still validating the real `amountMinor` — nothing downstream
- * of react-hook-form ever sees a rupee figure.
+ * Add/edit slide-over. The form validates against `expenseFormSchema`
+ * (above); the submit handler converts `amountRupees` to `amountMinor` and
+ * re-parses the result through the shared `createExpenseBody` so that schema
+ * stays the last client-side gate before `onSubmit`, exactly as it is for
+ * every other field.
  */
 export function ExpenseForm({
   open,
@@ -61,8 +102,8 @@ export function ExpenseForm({
     handleSubmit,
     reset,
     formState: { errors, isSubmitting },
-  } = useForm<CreateExpenseBody>({
-    resolver: zodResolver(createExpenseBody),
+  } = useForm<ExpenseFormValues>({
+    resolver: zodResolver(expenseFormSchema),
     defaultValues: defaultsFor(expense),
   });
 
@@ -80,7 +121,32 @@ export function ExpenseForm({
   const submit = handleSubmit(async (values) => {
     setBanner(null);
     try {
-      await onSubmit(values);
+      // DELIBERATELY UNTESTED, AND DELIBERATELY UNREACHABLE TODAY. Deleting
+      // this `.parse` turns no test red (it was mutation-tested: M3), so it
+      // will look like dead code to the next reader. It is not — it is an
+      // assertion boundary, and its threat model is future change, not
+      // present input:
+      //
+      //   - `parseRupeesToMinor` regresses (starts rounding, returns a float,
+      //     returns a negative) and `amountMinor`'s `.int().positive()`
+      //     catches it here instead of the API catching it as a 400 — or
+      //     worse, than nobody catching a wrong-but-valid amount.
+      //   - a required field is added to `createExpenseBody` that this form
+      //     does not set. The object literal below would still typecheck via
+      //     inference in some shapes; the parse fails loudly either way.
+      //
+      // Testing it would mean stubbing `parseRupeesToMinor` to lie, which
+      // asserts on the stub rather than on the form. The cost of keeping it
+      // is one function call per submit; the cost of removing it is a silent
+      // bad write. Keep it.
+      const body = createExpenseBody.parse({
+        amountMinor: parseRupeesToMinor(values.amountRupees),
+        categoryId: values.categoryId,
+        date: values.date,
+        description: values.description,
+        notes: values.notes,
+      });
+      await onSubmit(body);
       onClose();
     } catch (caught) {
       setBanner(
@@ -130,18 +196,10 @@ export function ExpenseForm({
         <Input
           label="Amount"
           prefix="Rs"
-          type="number"
-          step="0.01"
-          min="0.01"
+          type="text"
           inputMode="decimal"
-          defaultValue={
-            expense ? (expense.amountMinor / 100).toFixed(2) : undefined
-          }
-          {...register("amountMinor", {
-            setValueAs: (value: string) =>
-              value === "" ? Number.NaN : Math.round(Number(value) * 100),
-          })}
-          error={errors.amountMinor?.message}
+          {...register("amountRupees")}
+          error={errors.amountRupees?.message}
           required
         />
 
