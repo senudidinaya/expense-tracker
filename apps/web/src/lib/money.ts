@@ -49,3 +49,57 @@ export function formatLKR(amountMinor: number): string {
   const sign = negative ? "-" : "";
   return `${sign}Rs ${groupRupees.format(major)}.${String(minor).padStart(2, "0")}`;
 }
+
+/** Whole rupees, or up to two decimal digits — no sign, no exponent. */
+const RUPEES_RE = /^\d+(\.\d{1,2})?$/;
+
+/**
+ * Parses what a person typed into a rupee-denominated amount field into
+ * integer minor units — the inverse of `formatMinorForInput`. Must reject a
+ * third decimal digit rather than round it: rounding here would silently
+ * change the amount the user typed.
+ *
+ * String manipulation only, deliberately: `Number(input) * 100` reintroduces
+ * float error at the exact boundary this function exists to remove.
+ *
+ * The question this answers is "is this a well-formed rupee string, and what
+ * integer does it mean" — nothing more. `"0"` parses to `0`; whether zero is
+ * an acceptable *value* is a domain rule belonging to the field being filled
+ * (`amountMinor` is `.positive()` in `@expense/shared`, and `ExpenseForm`
+ * enforces that), not to the parser. A budget or a period-over-period delta
+ * may legitimately want to parse `"0"`.
+ *
+ * @throws TypeError if the input isn't a non-negative rupee amount with at
+ * most two decimal places.
+ */
+export function parseRupeesToMinor(input: string): number {
+  const trimmed = input.trim();
+
+  if (!RUPEES_RE.test(trimmed)) {
+    throw new TypeError(
+      `parseRupeesToMinor expects a rupee amount like "500.00", received ${String(input)}`,
+    );
+  }
+
+  const [major, fraction = ""] = trimmed.split(".");
+  return Number(`${major}${fraction.padEnd(2, "0")}`);
+}
+
+/**
+ * Formats integer minor units as the two-decimal rupee string an amount
+ * input should display (`50000` -> `"500.00"`) — the inverse of
+ * `parseRupeesToMinor`.
+ *
+ * @throws TypeError if given anything but a safe integer.
+ */
+export function formatMinorForInput(amountMinor: number): string {
+  if (!Number.isSafeInteger(amountMinor)) {
+    throw new TypeError(
+      `formatMinorForInput expects integer minor units, received ${String(amountMinor)}`,
+    );
+  }
+
+  const minor = amountMinor % 100;
+  const major = (amountMinor - minor) / 100;
+  return `${major}.${String(minor).padStart(2, "0")}`;
+}
