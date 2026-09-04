@@ -68,7 +68,21 @@ export function ExpensesPage() {
   }
 
   async function handleUpdate(body: CreateExpenseBody) {
-    if (panel.mode !== "edit") return;
+    // An assertion, not a guard, and unreachable by construction:
+    // `handleUpdate` is only ever handed to `ExpenseForm` in a render where
+    // `panel.mode === "edit"`, and it closes over that render's `panel`, so
+    // no interaction can arrive here. It throws rather than returning
+    // because the `return` it replaces *resolved* — which closed the form as
+    // though the save had happened, the one outcome a broken invariant must
+    // not produce. Throwing lands in `ExpenseForm`'s catch and shows its
+    // banner. Deliberately untested: reaching it would mean calling a
+    // private function directly and asserting on that call rather than on
+    // the app.
+    if (panel.mode !== "edit") {
+      throw new Error(
+        "handleUpdate called while the panel was not in edit mode",
+      );
+    }
     await updateExpense.mutateAsync({ id: panel.expense.id, body });
   }
 
@@ -79,6 +93,24 @@ export function ExpensesPage() {
     if (!ok) return;
     deleteExpense.mutate(expense.id);
   }
+
+  /**
+   * The expense whose delete failed, if it is still on screen.
+   *
+   * Not being optimistic keeps the row in place, which is right — but on its
+   * own that is indistinguishable from never having clicked Delete, so the
+   * failure has to be said out loud (BLOCKER 3). It is derived from `items`
+   * rather than stored in state on purpose: naming the expense is what makes
+   * the message unambiguous when several rows are on screen, and deriving it
+   * means the message cannot outlive the row it names. If a later refetch
+   * shows the expense gone — another session deleted it, or the error was a
+   * lie and the write landed — the banner goes with it instead of insisting
+   * a deletion failed for something that is no longer there.
+   */
+  const failedDelete =
+    deleteExpense.isError && deleteExpense.variables !== undefined
+      ? items.find((item) => item.id === deleteExpense.variables)
+      : undefined;
 
   const exportHref = `/api/expenses/export.csv?${filtersToSearchParams(filters).toString()}`;
   const hasActiveFilters =
@@ -112,6 +144,18 @@ export function ExpensesPage() {
         onChange={setFilters}
         categories={categories}
       />
+
+      {failedDelete ? (
+        <p
+          role="alert"
+          className="rounded-md border border-danger bg-danger-subtle px-3 py-2 text-sm text-danger"
+        >
+          {`Couldn't delete "${failedDelete.description}". `}
+          {deleteExpense.error instanceof ApiError
+            ? deleteExpense.error.message
+            : "Something went wrong. Please try again."}
+        </p>
+      ) : null}
 
       {firstPage && (firstPage.totalCount ?? 0) > 0 ? (
         <div className="flex items-center gap-2 text-sm text-muted">
